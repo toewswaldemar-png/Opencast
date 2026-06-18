@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"opencast/internal/audio"
+	"opencast/internal/config"
 	"opencast/internal/icecast"
 	"opencast/internal/stream"
 )
@@ -16,10 +17,11 @@ type Server struct {
 	manager *stream.Manager
 	monitor *stream.Monitor
 	hub     *Hub
+	store   *config.Store
 }
 
-func NewServer(manager *stream.Manager, monitor *stream.Monitor, hub *Hub) *Server {
-	s := &Server{manager: manager, monitor: monitor, hub: hub}
+func NewServer(manager *stream.Manager, monitor *stream.Monitor, hub *Hub, store *config.Store) *Server {
+	s := &Server{manager: manager, monitor: monitor, hub: hub, store: store}
 
 	manager.SetLevelCallback(func(lvl audio.LevelUpdate) {
 		hub.Broadcast(MsgLevel, lvl)
@@ -142,6 +144,41 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleMonitorStop(w http.ResponseWriter, r *http.Request) {
 	s.monitor.Stop()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// GET /api/config
+func (s *Server) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
+	cfg := s.store.Get()
+	// Token is intentionally excluded — the client already holds it
+	writeJSON(w, http.StatusOK, map[string]any{
+		"server":   cfg.Server,
+		"encoder":  cfg.Encoder,
+		"deviceId": cfg.DeviceID,
+	})
+}
+
+// PUT /api/config
+func (s *Server) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
+	var partial struct {
+		Server   config.ServerConfig  `json:"server"`
+		Encoder  config.EncoderConfig `json:"encoder"`
+		DeviceID string               `json:"deviceId"`
+	}
+	if err := decodeJSON(r, &partial); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Read current config and patch only the client-controlled fields;
+	// token and other backend-only fields are preserved.
+	cfg := s.store.Get()
+	cfg.Server = partial.Server
+	cfg.Encoder = partial.Encoder
+	cfg.DeviceID = partial.DeviceID
+	if err := s.store.Set(cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
 // GET /api/formats

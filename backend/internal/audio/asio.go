@@ -26,6 +26,10 @@ import (
 var (
 	globalASIOCapturerMu sync.Mutex
 	globalASIOCapturer   *ASIOCapturer
+
+	// Serializes asio_probe_driver calls — g_asio is a global C variable,
+	// so concurrent probes race on it and the second always returns 2 channels.
+	asioProbeMu sync.Mutex
 )
 
 //export goAsioBufferCallback
@@ -57,6 +61,21 @@ type ASIOCapturer struct {
 
 func (c *ASIOCapturer) OutputCh() <-chan []byte     { return c.pcmOut }
 func (c *ASIOCapturer) LevelCh() <-chan LevelUpdate { return c.levels }
+
+// ActualConfig returns the negotiated format (known after Start).
+// ASIO always outputs s16le; channels may be clamped by the driver.
+func (c *ASIOCapturer) ActualConfig() CaptureConfig {
+	ch := uint16(c.actualChannels)
+	if ch == 0 {
+		ch = c.cfg.Channels
+	}
+	return CaptureConfig{
+		DeviceID:   c.cfg.DeviceID,
+		SampleRate: c.cfg.SampleRate,
+		Channels:   ch,
+		BitDepth:   16,
+	}
+}
 
 func (c *ASIOCapturer) Start(ctx context.Context) error {
 	clsidStr := strings.TrimPrefix(c.cfg.DeviceID, "asio:")
@@ -230,14 +249,43 @@ func asioEnumerateDrivers() []Device {
 		if name == "" || clsid == "" {
 			continue
 		}
+
+		ch, sr := asioProbeDriver(clsid)
+
 		devices = append(devices, Device{
 			ID:                "asio:" + clsid,
 			Name:              name + " (ASIO)",
 			API:               APIAsio,
 			State:             StateActive,
-			MaxInputChannels:  2,
-			DefaultSampleRate: 48000,
+			MaxInputChannels:  ch,
+			DefaultSampleRate: sr,
 		})
 	}
 	return devices
+}
+
+// asioProbeDriver opens a driver briefly to read its channel count and sample
+// rate, then releases it immediately. Returns (2, 48000) as safe defaults when
+// the probe fails or another driver is already active.
+func asioProbeDriver(clsid string) (channels int, sampleRate float64) {
+	asioProbeMu.Lock()
+	defer asioProbeMu.Unlock()
+
+	cClsid := C.CString(clsid)
+	defer C.free(unsafe.Pointer(cClsid))
+
+	var numCh C.long
+	var sr C.double
+	if C.asio_probe_driver(cClsid, &numCh, &sr) != 0 {
+		return 2, 48000
+	}
+	ch := int(numCh)
+	if ch < 1 {
+		ch = 2
+	}
+	rate := float64(sr)
+	if rate <= 0 {
+		rate = 48000
+	}
+	return ch, rate
 }

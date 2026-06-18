@@ -5,6 +5,7 @@ package audio
 import (
 	"fmt"
 	"runtime"
+	"unsafe"
 
 	"github.com/go-ole/go-ole"
 	"github.com/moutend/go-wca/pkg/wca"
@@ -78,13 +79,14 @@ func enumerateWasapiDevices() ([]Device, error) {
 			name := wasapiFriendlyName(d)
 			d.Release()
 
+			ch, sr := wasapiDeviceMixFormat(d)
 			devices = append(devices, Device{
 				ID:                id,
 				Name:              name,
 				API:               APIWasapi,
 				State:             wasapiState(state),
-				MaxInputChannels:  2,
-				DefaultSampleRate: 48000,
+				MaxInputChannels:  ch,
+				DefaultSampleRate: sr,
 			})
 		}
 	}()
@@ -104,6 +106,22 @@ func wasapiState(s uint32) DeviceState {
 	default:
 		return StateNotPresent
 	}
+}
+
+func wasapiDeviceMixFormat(d *wca.IMMDevice) (channels int, sampleRate float64) {
+	var ac *wca.IAudioClient
+	if err := d.Activate(wca.IID_IAudioClient, wca.CLSCTX_ALL, nil, &ac); err != nil {
+		return 2, 48000
+	}
+	defer ac.Release()
+
+	var fmt *wca.WAVEFORMATEX
+	if err := ac.GetMixFormat(&fmt); err != nil {
+		return 2, 48000
+	}
+	defer ole.CoTaskMemFree(uintptr(unsafe.Pointer(fmt)))
+
+	return int(fmt.NChannels), float64(fmt.NSamplesPerSec)
 }
 
 func wasapiFriendlyName(d *wca.IMMDevice) string {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+
+	"opencast/internal/ffmpeg"
 )
 
 type Format string
@@ -31,8 +33,12 @@ func (f Format) ContentType() string {
 type EncoderConfig struct {
 	Format     Format
 	Bitrate    int
-	SampleRate uint32
-	Channels   uint16
+	SampleRate uint32 // target output sample rate
+	Channels   uint16 // target output channels
+	// InputSampleRate / InputChannels describe the raw PCM coming in.
+	// If zero, they fall back to SampleRate / Channels (no resampling).
+	InputSampleRate uint32
+	InputChannels   uint16
 }
 
 // Encoder wraps FFmpeg to encode raw PCM (s16le) to the configured format.
@@ -44,21 +50,39 @@ type Encoder struct {
 
 // NewEncoder creates and starts an FFmpeg encoder subprocess.
 func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
+	ffExe, err := ffmpeg.Resolve()
+	if err != nil {
+		return nil, fmt.Errorf("create encoder: %w", err)
+	}
+
 	outputFmt, codec := ffmpegFormat(cfg.Format)
+
+	inRate := cfg.InputSampleRate
+	if inRate == 0 {
+		inRate = cfg.SampleRate
+	}
+	inCh := cfg.InputChannels
+	if inCh == 0 {
+		inCh = cfg.Channels
+	}
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
+		// Input format: s16le at the device's actual rate
 		"-f", "s16le",
-		"-ar", fmt.Sprintf("%d", cfg.SampleRate),
-		"-ac", fmt.Sprintf("%d", cfg.Channels),
+		"-ar", fmt.Sprintf("%d", inRate),
+		"-ac", fmt.Sprintf("%d", inCh),
 		"-i", "pipe:0",
 		"-c:a", codec,
 		"-b:a", fmt.Sprintf("%dk", cfg.Bitrate),
+		// Output sample rate / channels (FFmpeg resamples as needed)
+		"-ar", fmt.Sprintf("%d", cfg.SampleRate),
+		"-ac", fmt.Sprintf("%d", cfg.Channels),
 		"-f", outputFmt,
 		"pipe:1",
 	}
 
-	cmd := exec.Command("ffmpeg", args...)
+	cmd := exec.Command(ffExe, args...)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

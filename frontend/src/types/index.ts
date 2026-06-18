@@ -30,7 +30,7 @@ export interface EncoderConfig {
   format: StreamFormat
   bitrate: number
   sampleRate: number
-  channels: 1 | 2
+  channels: number
 }
 
 export interface StreamConfig {
@@ -45,6 +45,7 @@ export interface StreamConfig {
 export interface StreamStatus {
   running: boolean
   connected: boolean
+  reconnecting: boolean
   uptime: number
   bytesSent: number
   bitrate: number
@@ -87,4 +88,18 @@ export const DEFAULT_ENCODER: EncoderConfig = {
   bitrate: 192,
   sampleRate: 44100,
   channels: 2,
+}
+
+export interface ServerEntry {
+  id: string
+  label: string
+  config: ServerConfig
+}
+
+export function makeServerEntry(label = 'Neuer Server'): ServerEntry {
+  return {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    label,
+    config: { ...DEFAULT_SERVER },
+  }
 }

@@ -48,5 +48,7 @@ type Capturer interface {
 	Stop()
 	OutputCh() <-chan []byte
 	LevelCh() <-chan LevelUpdate
+	// ActualConfig returns the negotiated device format (known after Start).
+	ActualConfig() CaptureConfig
 }
 

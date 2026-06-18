@@ -5,6 +5,7 @@ package audio
 import (
 	"fmt"
 	"runtime"
+	"unsafe"
 
 	"github.com/go-ole/go-ole"
 	"github.com/moutend/go-wca/pkg/wca"
@@ -74,6 +75,7 @@ func EnumerateInputDevices() ([]Device, error) {
 			d.GetState(&state)
 
 			name := deviceFriendlyName(d)
+			ch, sr := deviceMixFormat(d)
 			d.Release()
 
 			devices = append(devices, Device{
@@ -81,8 +83,8 @@ func EnumerateInputDevices() ([]Device, error) {
 				Name:              name,
 				API:               APIWasapi,
 				State:             wasapiDeviceState(state),
-				MaxInputChannels:  2,
-				DefaultSampleRate: 48000,
+				MaxInputChannels:  ch,
+				DefaultSampleRate: sr,
 			})
 		}
 	}()
@@ -102,6 +104,25 @@ func wasapiDeviceState(s uint32) DeviceState {
 	default:
 		return StateNotPresent
 	}
+}
+
+// deviceMixFormat returns (channels, sampleRate) from the device's native mix
+// format. Falls back to (2, 48000) if the audio client cannot be activated
+// (e.g. device is disabled or not present).
+func deviceMixFormat(d *wca.IMMDevice) (channels int, sampleRate float64) {
+	var ac *wca.IAudioClient
+	if err := d.Activate(wca.IID_IAudioClient, wca.CLSCTX_ALL, nil, &ac); err != nil {
+		return 2, 48000
+	}
+	defer ac.Release()
+
+	var fmt *wca.WAVEFORMATEX
+	if err := ac.GetMixFormat(&fmt); err != nil {
+		return 2, 48000
+	}
+	defer ole.CoTaskMemFree(uintptr(unsafe.Pointer(fmt)))
+
+	return int(fmt.NChannels), float64(fmt.NSamplesPerSec)
 }
 
 func deviceFriendlyName(d *wca.IMMDevice) string {

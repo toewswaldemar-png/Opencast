@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -24,12 +25,13 @@ type Config struct {
 }
 
 type Status struct {
-	Running   bool         `json:"running"`
-	Connected bool         `json:"connected"`
-	Uptime    int64        `json:"uptime"` // nanoseconds
-	BytesSent int64        `json:"bytesSent"`
-	Bitrate   int          `json:"bitrate"`
-	Format    audio.Format `json:"format"`
+	Running      bool         `json:"running"`
+	Connected    bool         `json:"connected"`
+	Reconnecting bool         `json:"reconnecting"`
+	Uptime       int64        `json:"uptime"` // nanoseconds
+	BytesSent    int64        `json:"bytesSent"`
+	Bitrate      int          `json:"bitrate"`
+	Format       audio.Format `json:"format"`
 }
 
 // LevelCallback is called with audio level updates.
@@ -37,15 +39,16 @@ type LevelCallback func(audio.LevelUpdate)
 
 // Manager orchestrates capture → encode → stream.
 type Manager struct {
-	mu        sync.Mutex
-	running   bool
-	cancel    context.CancelFunc
-	done      chan struct{}
-	lastCfg   Config
-	levelCb   LevelCallback
-	capturer  audio.Capturer
-	encoder   *audio.Encoder
-	iceclient *icecast.Client
+	mu           sync.Mutex
+	running      bool
+	reconnecting bool
+	cancel       context.CancelFunc
+	done         chan struct{}
+	lastCfg      Config
+	levelCb      LevelCallback
+	capturer     audio.Capturer
+	encoder      *audio.Encoder
+	iceclient    *icecast.Client
 }
 
 func NewManager() *Manager {
@@ -67,22 +70,32 @@ func (m *Manager) Start(cfg Config) error {
 		return fmt.Errorf("stream already running")
 	}
 
-	captureCfg := audio.CaptureConfig{
+	cap := audio.NewCapturer(audio.CaptureConfig{
 		DeviceID:   cfg.DeviceID,
 		SampleRate: cfg.SampleRate,
 		Channels:   cfg.Channels,
 		BitDepth:   16,
+	})
+
+	// Start capturer first so ActualConfig() reflects the negotiated device format.
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := cap.Start(ctx); err != nil {
+		cancel()
+		return fmt.Errorf("start capture: %w", err)
 	}
 
-	cap := audio.NewCapturer(captureCfg)
-
+	actual := cap.ActualConfig()
 	enc, err := audio.NewEncoder(audio.EncoderConfig{
-		Format:     cfg.Format,
-		Bitrate:    cfg.Bitrate,
-		SampleRate: cfg.SampleRate,
-		Channels:   cfg.Channels,
+		Format:          cfg.Format,
+		Bitrate:         cfg.Bitrate,
+		SampleRate:      cfg.SampleRate,
+		Channels:        cfg.Channels,
+		InputSampleRate: actual.SampleRate,
+		InputChannels:   actual.Channels,
 	})
 	if err != nil {
+		cancel()
+		cap.Stop()
 		return fmt.Errorf("create encoder: %w", err)
 	}
 
@@ -91,20 +104,14 @@ func (m *Manager) Start(cfg Config) error {
 	ice := icecast.NewClient(serverCfg)
 
 	if err := ice.Connect(); err != nil {
+		cancel()
+		cap.Stop()
 		enc.Close()
 		return fmt.Errorf("connect to icecast: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	if err := cap.Start(ctx); err != nil {
-		cancel()
-		ice.Disconnect()
-		enc.Close()
-		return fmt.Errorf("start capture: %w", err)
-	}
-
 	m.running = true
+	m.reconnecting = false
 	m.cancel = cancel
 	m.done = make(chan struct{})
 	m.lastCfg = cfg
@@ -113,7 +120,7 @@ func (m *Manager) Start(cfg Config) error {
 	m.iceclient = ice
 
 	go m.pumpAudio(ctx, cap, enc)
-	go m.pumpEncoded(enc.Output(), ice)
+	go m.pumpEncoded(ctx, enc.Output())
 	go m.pumpLevels(ctx, cap)
 
 	return nil
@@ -133,18 +140,74 @@ func (m *Manager) pumpAudio(ctx context.Context, cap audio.Capturer, enc *audio.
 	}
 }
 
-func (m *Manager) pumpEncoded(src io.Reader, ice *icecast.Client) {
+func (m *Manager) pumpEncoded(ctx context.Context, src io.Reader) {
 	defer close(m.done)
 	buf := make([]byte, 4096)
+
 	for {
-		n, err := src.Read(buf)
+		n, readErr := src.Read(buf)
 		if n > 0 {
+			m.mu.Lock()
+			ice := m.iceclient
+			m.mu.Unlock()
+
 			if _, werr := ice.Write(buf[:n]); werr != nil {
-				return
+				ice.Disconnect()
+				if err := m.reconnect(ctx); err != nil {
+					return // context cancelled
+				}
+				// Retry with new connection; drop the failed chunk
 			}
 		}
-		if err != nil {
+		if readErr != nil {
 			return
+		}
+	}
+}
+
+// reconnect attempts to re-establish the Icecast connection with exponential
+// backoff (1 s → 2 s → 4 s … capped at 30 s). Returns when connected or
+// when ctx is cancelled.
+func (m *Manager) reconnect(ctx context.Context) error {
+	m.mu.Lock()
+	m.reconnecting = true
+	cfg := m.lastCfg
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.reconnecting = false
+		m.mu.Unlock()
+	}()
+
+	backoff := time.Second
+	for attempt := 1; ; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		log.Printf("[stream] Reconnect Versuch %d (nächster in %s)...", attempt, backoff)
+
+		serverCfg := cfg.Server
+		serverCfg.ContentType = cfg.Format.ContentType()
+		newIce := icecast.NewClient(serverCfg)
+
+		if err := newIce.Connect(); err == nil {
+			log.Printf("[stream] Reconnect nach %d Versuch(en) erfolgreich", attempt)
+			m.mu.Lock()
+			m.iceclient = newIce
+			m.mu.Unlock()
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+
+		if backoff < 30*time.Second {
+			backoff *= 2
 		}
 	}
 }
@@ -195,6 +258,7 @@ func (m *Manager) Stop() {
 
 	m.mu.Lock()
 	m.running = false
+	m.reconnecting = false
 	m.capturer = nil
 	m.encoder = nil
 	m.iceclient = nil
@@ -205,18 +269,23 @@ func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !m.running || m.iceclient == nil {
+	if !m.running {
 		return Status{Running: false}
 	}
 
-	s := m.iceclient.Stats()
+	var stats icecast.Stats
+	if m.iceclient != nil {
+		stats = m.iceclient.Stats()
+	}
+
 	return Status{
-		Running:   true,
-		Connected: s.Connected,
-		Uptime:    s.Uptime.Nanoseconds(),
-		BytesSent: s.BytesSent,
-		Bitrate:   m.lastCfg.Bitrate,
-		Format:    m.lastCfg.Format,
+		Running:      true,
+		Connected:    stats.Connected,
+		Reconnecting: m.reconnecting,
+		Uptime:       stats.Uptime.Nanoseconds(),
+		BytesSent:    stats.BytesSent,
+		Bitrate:      m.lastCfg.Bitrate,
+		Format:       m.lastCfg.Format,
 	}
 }
 

@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { StreamConfig, StreamStatus, FormatInfo } from '../types'
+import { apiFetch } from '../lib/api'
 
 interface UseStreamReturn {
   status: StreamStatus
@@ -15,6 +16,7 @@ interface UseStreamReturn {
 const DEFAULT_STATUS: StreamStatus = {
   running: false,
   connected: false,
+  reconnecting: false,
   uptime: 0,
   bytesSent: 0,
   bitrate: 0,
@@ -31,7 +33,7 @@ export function useStream(): UseStreamReturn {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/stream/start', {
+      const res = await apiFetch('/api/stream/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cfg),
@@ -50,7 +52,7 @@ export function useStream(): UseStreamReturn {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/stream/stop', { method: 'POST' })
+      const res = await apiFetch('/api/stream/stop', { method: 'POST' })
       if (!res.ok) {
         const data = await res.json()
         throw new Error(data.error ?? 'Stream konnte nicht gestoppt werden')
@@ -64,7 +66,7 @@ export function useStream(): UseStreamReturn {
 
   const fetchFormats = useCallback(async () => {
     try {
-      const res = await fetch('/api/formats')
+      const res = await apiFetch('/api/formats')
       if (res.ok) setFormats(await res.json())
     } catch {
       // ignore

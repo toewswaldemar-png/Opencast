@@ -1,16 +1,17 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { WSPayload } from '../types'
+import { wsUrl } from '../lib/api'
 
 type MessageHandler = (msg: WSPayload) => void
 
-export function useWebSocket(onMessage: MessageHandler) {
+export function useWebSocket(onMessage: MessageHandler, token: string) {
   const wsRef = useRef<WebSocket | null>(null)
   const handlerRef = useRef(onMessage)
   handlerRef.current = onMessage
 
   const connect = useCallback(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const ws = new WebSocket(`${protocol}://${window.location.host}/ws`)
+    if (!token) return
+    const ws = new WebSocket(wsUrl('/ws'))
     wsRef.current = ws
 
     ws.onmessage = (event) => {
@@ -44,5 +45,5 @@ export function useWebSocket(onMessage: MessageHandler) {
         ws.close()
       }
     }
-  }, [connect])
+  }, [connect, token])
 }

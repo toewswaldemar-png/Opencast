@@ -486,6 +486,20 @@ cleanup:
     g_stopEvent = NULL;
 }
 
+int asio_probe_driver(const char *clsidStr, long *numInputCh, double *sampleRate) {
+    /* Skip if a capture session is already using the driver */
+    if (g_asio) {
+        *numInputCh = 0;
+        *sampleRate = 0;
+        return -1;
+    }
+    char errBuf[256];
+    if (asio_open_driver(clsidStr, errBuf, sizeof(errBuf)) != 0) return -1;
+    int ret = asio_get_driver_info(numInputCh, sampleRate, errBuf, sizeof(errBuf));
+    asio_release_driver();
+    return ret;
+}
+
 void asio_release_driver(void) {
     if (!g_asio) return;
     g_asio->lpVtbl->Release(g_asio);
