@@ -1,0 +1,17 @@
+# Build outputs
+backend/opencast.exe
+backend/opencast-asio.exe
+backend/opencast.exe~
+backend/dist/
+
+# Go
+backend/tmp/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
