@@ -7,9 +7,17 @@ import (
 	"sync"
 )
 
+// ServerEntry mirrors the frontend ServerEntry type.
+type ServerEntry struct {
+	ID     string       `json:"id"`
+	Label  string       `json:"label"`
+	Config ServerConfig `json:"config"`
+}
+
 // Config mirrors the frontend types exactly so it round-trips through JSON without conversion.
 type Config struct {
 	Server   ServerConfig  `json:"server"`
+	Servers  []ServerEntry `json:"servers,omitempty"`
 	Encoder  EncoderConfig `json:"encoder"`
 	DeviceID string        `json:"deviceId"`
 	Token    string        `json:"token"`

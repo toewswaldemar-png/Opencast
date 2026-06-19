@@ -1,35 +1,26 @@
-import { useState } from 'react'
+import { useState, type FormEvent } from 'react'
 import { Radio, Lock } from 'lucide-react'
+import { Input }  from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { cn }     from '@/lib/utils'
 
-interface Props {
-  onToken: (token: string) => void
-}
+interface Props { onToken: (token: string) => void }
 
 export default function TokenGate({ onToken }: Props) {
-  const [value, setValue] = useState('')
-  const [error, setError] = useState(false)
+  const [value, setValue]   = useState('')
+  const [error, setError]   = useState(false)
   const [loading, setLoading] = useState(false)
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     const token = value.trim()
     if (!token) return
-    setLoading(true)
-    setError(false)
+    setLoading(true); setError(false)
     try {
-      const res = await fetch('/api/status', {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (res.ok) {
-        onToken(token)
-      } else {
-        setError(true)
-      }
-    } catch {
-      setError(true)
-    } finally {
-      setLoading(false)
-    }
+      const res = await fetch('/api/status', { headers: { Authorization: `Bearer ${token}` } })
+      if (res.ok) { onToken(token) } else { setError(true) }
+    } catch { setError(true) }
+    finally { setLoading(false) }
   }
 
   return (
@@ -51,27 +42,22 @@ export default function TokenGate({ onToken }: Props) {
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <input
+          <Input
             type="password"
             placeholder="Token eingeben..."
             value={value}
             onChange={(e) => { setValue(e.target.value); setError(false) }}
-            className={`w-full bg-slate-800 border rounded-lg px-3 py-2.5 text-sm text-slate-100 font-mono outline-none transition-colors placeholder:text-slate-600 focus:border-blue-500 ${
-              error ? 'border-red-500' : 'border-slate-700'
-            }`}
+            className={cn(
+              'bg-slate-800 border-slate-700 text-slate-100 font-mono placeholder:text-slate-600 focus-visible:ring-blue-500',
+              error && 'border-red-500'
+            )}
             autoFocus
             autoComplete="off"
           />
-          {error && (
-            <p className="text-xs text-red-400">Ungültiger Token</p>
-          )}
-          <button
-            type="submit"
-            disabled={loading || !value.trim()}
-            className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-semibold rounded-lg transition-colors"
-          >
+          {error && <p className="text-xs text-red-400">Ungültiger Token</p>}
+          <Button type="submit" disabled={loading || !value.trim()} className="w-full bg-blue-600 hover:bg-blue-700 text-white">
             {loading ? 'Prüfe...' : 'Verbinden'}
-          </button>
+          </Button>
         </form>
 
         <p className="text-[10px] text-slate-600 text-center mt-4">

@@ -57,9 +57,13 @@ export interface LevelUpdate {
   right: number
 }
 
+// AllStreamStatus maps server-entry IDs to their live stream status.
+// Only running streams appear in the map.
+export type AllStreamStatus = Record<string, StreamStatus>
+
 export type WSPayload =
   | { type: 'level'; payload: LevelUpdate }
-  | { type: 'status'; payload: StreamStatus }
+  | { type: 'status'; payload: AllStreamStatus }
   | { type: 'error'; payload: { message: string } }
 
 export interface FormatInfo {

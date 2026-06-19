@@ -14,7 +14,7 @@ import (
 	"opencast/internal/icecast"
 )
 
-// Config is the combined configuration for a streaming session.
+// Config is the combined configuration for one streaming session.
 type Config struct {
 	DeviceID   string               `json:"deviceId"`
 	SampleRate uint32               `json:"sampleRate"`
@@ -34,25 +34,30 @@ type Status struct {
 	Format       audio.Format `json:"format"`
 }
 
-// LevelCallback is called with audio level updates.
 type LevelCallback func(audio.LevelUpdate)
 
-// Manager orchestrates capture → encode → stream.
-type Manager struct {
-	mu           sync.Mutex
-	running      bool
-	reconnecting bool
+// session holds all runtime state for one active stream.
+type session struct {
+	cfg          Config
 	cancel       context.CancelFunc
 	done         chan struct{}
-	lastCfg      Config
-	levelCb      LevelCallback
 	capturer     audio.Capturer
 	encoder      *audio.Encoder
 	iceclient    *icecast.Client
+	startedAt    time.Time
+	reconnecting bool
+}
+
+// Manager runs zero or more concurrent streaming sessions, each identified
+// by an opaque string ID (the server-entry ID from the frontend).
+type Manager struct {
+	mu       sync.Mutex
+	sessions map[string]*session
+	levelCb  LevelCallback
 }
 
 func NewManager() *Manager {
-	return &Manager{}
+	return &Manager{sessions: make(map[string]*session)}
 }
 
 func (m *Manager) SetLevelCallback(cb LevelCallback) {
@@ -61,13 +66,13 @@ func (m *Manager) SetLevelCallback(cb LevelCallback) {
 	m.levelCb = cb
 }
 
-// Start begins a streaming session with the given config.
-func (m *Manager) Start(cfg Config) error {
+// Start launches a new streaming session for the given id.
+func (m *Manager) Start(id string, cfg Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.running {
-		return fmt.Errorf("stream already running")
+	if _, exists := m.sessions[id]; exists {
+		return fmt.Errorf("stream %q läuft bereits", id)
 	}
 
 	cap := audio.NewCapturer(audio.CaptureConfig{
@@ -77,7 +82,6 @@ func (m *Manager) Start(cfg Config) error {
 		BitDepth:   16,
 	})
 
-	// Start capturer first so ActualConfig() reflects the negotiated device format.
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := cap.Start(ctx); err != nil {
 		cancel()
@@ -110,17 +114,19 @@ func (m *Manager) Start(cfg Config) error {
 		return fmt.Errorf("connect to icecast: %w", err)
 	}
 
-	m.running = true
-	m.reconnecting = false
-	m.cancel = cancel
-	m.done = make(chan struct{})
-	m.lastCfg = cfg
-	m.capturer = cap
-	m.encoder = enc
-	m.iceclient = ice
+	sess := &session{
+		cfg:       cfg,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		capturer:  cap,
+		encoder:   enc,
+		iceclient: ice,
+		startedAt: time.Now(),
+	}
+	m.sessions[id] = sess
 
 	go m.pumpAudio(ctx, cap, enc)
-	go m.pumpEncoded(ctx, enc.Output())
+	go m.pumpEncoded(id, ctx, sess, enc.Output())
 	go m.pumpLevels(ctx, cap)
 
 	return nil
@@ -140,23 +146,22 @@ func (m *Manager) pumpAudio(ctx context.Context, cap audio.Capturer, enc *audio.
 	}
 }
 
-func (m *Manager) pumpEncoded(ctx context.Context, src io.Reader) {
-	defer close(m.done)
+func (m *Manager) pumpEncoded(id string, ctx context.Context, sess *session, src io.Reader) {
+	defer close(sess.done)
 	buf := make([]byte, 4096)
 
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
 			m.mu.Lock()
-			ice := m.iceclient
+			ice := sess.iceclient
 			m.mu.Unlock()
 
 			if _, werr := ice.Write(buf[:n]); werr != nil {
 				ice.Disconnect()
-				if err := m.reconnect(ctx); err != nil {
-					return // context cancelled
+				if err := m.reconnect(id, ctx, sess); err != nil {
+					return
 				}
-				// Retry with new connection; drop the failed chunk
 			}
 		}
 		if readErr != nil {
@@ -165,18 +170,15 @@ func (m *Manager) pumpEncoded(ctx context.Context, src io.Reader) {
 	}
 }
 
-// reconnect attempts to re-establish the Icecast connection with exponential
-// backoff (1 s → 2 s → 4 s … capped at 30 s). Returns when connected or
-// when ctx is cancelled.
-func (m *Manager) reconnect(ctx context.Context) error {
+func (m *Manager) reconnect(id string, ctx context.Context, sess *session) error {
 	m.mu.Lock()
-	m.reconnecting = true
-	cfg := m.lastCfg
+	sess.reconnecting = true
+	cfg := sess.cfg
 	m.mu.Unlock()
 
 	defer func() {
 		m.mu.Lock()
-		m.reconnecting = false
+		sess.reconnecting = false
 		m.mu.Unlock()
 	}()
 
@@ -185,17 +187,16 @@ func (m *Manager) reconnect(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-
-		log.Printf("[stream] Reconnect Versuch %d (nächster in %s)...", attempt, backoff)
+		log.Printf("[stream/%s] Reconnect Versuch %d (nächster in %s)…", id, attempt, backoff)
 
 		serverCfg := cfg.Server
 		serverCfg.ContentType = cfg.Format.ContentType()
 		newIce := icecast.NewClient(serverCfg)
 
 		if err := newIce.Connect(); err == nil {
-			log.Printf("[stream] Reconnect nach %d Versuch(en) erfolgreich", attempt)
+			log.Printf("[stream/%s] Reconnect nach %d Versuch(en) erfolgreich", id, attempt)
 			m.mu.Lock()
-			m.iceclient = newIce
+			sess.iceclient = newIce
 			m.mu.Unlock()
 			return nil
 		}
@@ -205,7 +206,6 @@ func (m *Manager) reconnect(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(backoff):
 		}
-
 		if backoff < 30*time.Second {
 			backoff *= 2
 		}
@@ -231,18 +231,20 @@ func (m *Manager) pumpLevels(ctx context.Context, cap audio.Capturer) {
 	}
 }
 
-// Stop ends the current streaming session.
-func (m *Manager) Stop() {
+// Stop ends the streaming session with the given id.
+func (m *Manager) Stop(id string) {
 	m.mu.Lock()
-	if !m.running {
+	sess, ok := m.sessions[id]
+	if !ok {
 		m.mu.Unlock()
 		return
 	}
-	cancel := m.cancel
-	cap := m.capturer
-	enc := m.encoder
-	ice := m.iceclient
-	done := m.done
+	delete(m.sessions, id)
+	cancel := sess.cancel
+	cap := sess.capturer
+	enc := sess.encoder
+	ice := sess.iceclient
+	done := sess.done
 	m.mu.Unlock()
 
 	cancel()
@@ -253,44 +255,79 @@ func (m *Manager) Stop() {
 	case <-done:
 	case <-time.After(5 * time.Second):
 	}
-
 	ice.Disconnect()
+}
 
+// StopAll stops every running session.
+func (m *Manager) StopAll() {
 	m.mu.Lock()
-	m.running = false
-	m.reconnecting = false
-	m.capturer = nil
-	m.encoder = nil
-	m.iceclient = nil
+	ids := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
 	m.mu.Unlock()
-}
-
-func (m *Manager) Status() Status {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.running {
-		return Status{Running: false}
-	}
-
-	var stats icecast.Stats
-	if m.iceclient != nil {
-		stats = m.iceclient.Stats()
-	}
-
-	return Status{
-		Running:      true,
-		Connected:    stats.Connected,
-		Reconnecting: m.reconnecting,
-		Uptime:       stats.Uptime.Nanoseconds(),
-		BytesSent:    stats.BytesSent,
-		Bitrate:      m.lastCfg.Bitrate,
-		Format:       m.lastCfg.Format,
+	for _, id := range ids {
+		m.Stop(id)
 	}
 }
 
-func (m *Manager) IsRunning() bool {
+// Status returns a snapshot of all running sessions.
+func (m *Manager) Status() map[string]Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.running
+
+	out := make(map[string]Status, len(m.sessions))
+	for id, sess := range m.sessions {
+		var stats icecast.Stats
+		if sess.iceclient != nil {
+			stats = sess.iceclient.Stats()
+		}
+		out[id] = Status{
+			Running:      true,
+			Connected:    stats.Connected,
+			Reconnecting: sess.reconnecting,
+			Uptime:       time.Since(sess.startedAt).Nanoseconds(),
+			BytesSent:    stats.BytesSent,
+			Bitrate:      sess.cfg.Bitrate,
+			Format:       sess.cfg.Format,
+		}
+	}
+	return out
+}
+
+// IsRunning reports whether the session with the given id is active.
+func (m *Manager) IsRunning(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.sessions[id]
+	return ok
+}
+
+// AnyRunning reports whether at least one session is active.
+func (m *Manager) AnyRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions) > 0
+}
+
+// DeviceInUse reports whether any active session is capturing from deviceID.
+func (m *Manager) DeviceInUse(deviceID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sess := range m.sessions {
+		if sess.cfg.DeviceID == deviceID {
+			return true
+		}
+	}
+	return false
+}
+
+// DeviceIDFor returns the capture device used by session id, or "" if not running.
+func (m *Manager) DeviceIDFor(id string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess, ok := m.sessions[id]; ok {
+		return sess.cfg.DeviceID
+	}
+	return ""
 }

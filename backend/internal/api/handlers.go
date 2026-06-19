@@ -30,7 +30,7 @@ func NewServer(manager *stream.Manager, monitor *stream.Monitor, hub *Hub, store
 		hub.Broadcast(MsgLevel, lvl)
 	})
 
-	// Periodically broadcast stream status
+	// Broadcast all stream statuses every second.
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -52,13 +52,14 @@ func (s *Server) HandleDevices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, devices)
 }
 
-// GET /api/status
+// GET /api/status — returns the full multi-stream status map.
 func (s *Server) HandleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.manager.Status())
 }
 
 // POST /api/stream/start
 type StartRequest struct {
+	StreamID   string               `json:"streamId"` // server-entry ID from frontend
 	DeviceID   string               `json:"deviceId"`
 	SampleRate uint32               `json:"sampleRate"`
 	Channels   uint16               `json:"channels"`
@@ -73,7 +74,10 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-
+	if req.StreamID == "" {
+		writeError(w, http.StatusBadRequest, "streamId erforderlich")
+		return
+	}
 	if req.SampleRate == 0 {
 		req.SampleRate = 44100
 	}
@@ -87,6 +91,11 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 		req.Format = audio.FormatMP3
 	}
 
+	// Stop passive monitor for this device so capture isn't blocked.
+	if s.monitor.LastConfig().DeviceID == req.DeviceID {
+		s.monitor.Stop()
+	}
+
 	cfg := stream.Config{
 		DeviceID:   req.DeviceID,
 		SampleRate: req.SampleRate,
@@ -95,16 +104,11 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 		Bitrate:    req.Bitrate,
 		Server:     req.Server,
 	}
-
-	s.monitor.Stop()
-
-	if err := s.manager.Start(cfg); err != nil {
-		// Resume monitoring on failure
-		_ = s.monitor.Start(stream.MonitorConfig{
-			DeviceID:   req.DeviceID,
-			SampleRate: req.SampleRate,
-			Channels:   req.Channels,
-		})
+	if err := s.manager.Start(req.StreamID, cfg); err != nil {
+		// Restore monitor on failure if no other stream uses this device.
+		if !s.manager.DeviceInUse(req.DeviceID) && s.monitor.HasLastConfig() {
+			_ = s.monitor.Start(s.monitor.LastConfig())
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -113,12 +117,30 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/stream/stop
+type StopRequest struct {
+	StreamID string `json:"streamId"`
+}
+
 func (s *Server) HandleStop(w http.ResponseWriter, r *http.Request) {
-	s.manager.Stop()
-	// Resume level monitoring after stream ends
-	if s.monitor.HasLastConfig() {
+	var req StopRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.StreamID == "" {
+		writeError(w, http.StatusBadRequest, "streamId erforderlich")
+		return
+	}
+
+	// Remember device before stopping so we can resume the monitor.
+	deviceID := s.manager.DeviceIDFor(req.StreamID)
+	s.manager.Stop(req.StreamID)
+
+	// Resume passive monitor if nothing else is capturing this device.
+	if deviceID != "" && !s.manager.DeviceInUse(deviceID) && s.monitor.HasLastConfig() {
 		_ = s.monitor.Start(s.monitor.LastConfig())
 	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
@@ -129,7 +151,8 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if s.manager.IsRunning() {
+	// Don't start monitor if the device is already captured by a running stream.
+	if s.manager.DeviceInUse(cfg.DeviceID) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "streaming"})
 		return
 	}
@@ -149,31 +172,33 @@ func (s *Server) HandleMonitorStop(w http.ResponseWriter, r *http.Request) {
 // GET /api/config
 func (s *Server) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Get()
-	// Token is intentionally excluded — the client already holds it
 	writeJSON(w, http.StatusOK, map[string]any{
 		"server":   cfg.Server,
 		"encoder":  cfg.Encoder,
 		"deviceId": cfg.DeviceID,
+		"servers":  cfg.Servers,
 	})
 }
 
 // PUT /api/config
 func (s *Server) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	var partial struct {
-		Server   config.ServerConfig  `json:"server"`
-		Encoder  config.EncoderConfig `json:"encoder"`
-		DeviceID string               `json:"deviceId"`
+		Server   config.ServerConfig   `json:"server"`
+		Encoder  config.EncoderConfig  `json:"encoder"`
+		DeviceID string                `json:"deviceId"`
+		Servers  []config.ServerEntry  `json:"servers"`
 	}
 	if err := decodeJSON(r, &partial); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Read current config and patch only the client-controlled fields;
-	// token and other backend-only fields are preserved.
 	cfg := s.store.Get()
 	cfg.Server = partial.Server
 	cfg.Encoder = partial.Encoder
 	cfg.DeviceID = partial.DeviceID
+	if len(partial.Servers) > 0 {
+		cfg.Servers = partial.Servers
+	}
 	if err := s.store.Set(cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

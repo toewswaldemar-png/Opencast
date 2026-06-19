@@ -1,85 +1,94 @@
-import { Cpu } from 'lucide-react'
 import { EncoderConfig, StreamFormat } from '../types'
+import { cn } from '@/lib/utils'
 
-interface Props { config: EncoderConfig; disabled: boolean; onChange: (cfg: Partial<EncoderConfig>) => void; bare?: boolean }
+interface Props { config: EncoderConfig; disabled: boolean; onChange: (cfg: Partial<EncoderConfig>) => void }
 
 const FORMATS: { id: StreamFormat; label: string; sub: string }[] = [
-  { id: 'mp3', label: 'MP3', sub: 'lame' },
+  { id: 'mp3', label: 'MP3', sub: 'lame'   },
   { id: 'aac', label: 'AAC', sub: 'native' },
   { id: 'ogg', label: 'OGG', sub: 'vorbis' },
 ]
 
-const BITRATES_PER_FORMAT: Record<StreamFormat, number[]> = {
+const BITRATES: Record<StreamFormat, number[]> = {
   mp3: [64, 96, 128, 192, 256, 320],
   aac: [64, 96, 128, 192, 256],
   ogg: [64, 96, 128, 192, 256],
 }
 
-export default function EncoderSettings({ config, disabled, onChange, bare }: Props) {
-  const bitrates = BITRATES_PER_FORMAT[config.format]
+export default function EncoderSettings({ config, disabled, onChange }: Props) {
+  const bitrates = BITRATES[config.format]
 
   const handleFormatChange = (fmt: StreamFormat) => {
-    const rates = BITRATES_PER_FORMAT[fmt]
+    const rates   = BITRATES[fmt]
     const bitrate = rates.includes(config.bitrate) ? config.bitrate : rates[3] ?? rates[rates.length - 1]
     onChange({ format: fmt, bitrate })
   }
 
   return (
-    <div className={bare
-      ? 'flex flex-col gap-2'
-      : 'rounded-xl p-4 flex flex-col gap-3.5 border border-slate-200 bg-white shadow-sm'}>
-      {bare ? (
-        <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wide">Encoder</span>
-      ) : (
-        <div className="flex items-center gap-2">
-          <Cpu size={15} className="text-indigo-500" />
-          <span className="text-sm font-semibold text-slate-700">Encoder</span>
-          <span className="ml-auto text-[9px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-400 border border-slate-200">
-            FFmpeg
-          </span>
-        </div>
-      )}
+    <div className="flex flex-col gap-5">
 
-      <div className="grid grid-cols-3 gap-1.5">
-        {FORMATS.map((f) => (
-          <button key={f.id} onClick={() => handleFormatChange(f.id)} disabled={disabled}
-            className="flex flex-col items-center gap-0.5 py-2.5 rounded-lg border transition-all disabled:opacity-50"
-            style={config.format === f.id ? {
-              borderColor: 'rgba(99,102,241,0.4)', background: 'rgba(99,102,241,0.07)', color: '#4f46e5',
-            } : { borderColor: '#e2e8f0', background: '#f8fafc', color: '#94a3b8' }}>
-            <span className="text-sm font-bold font-mono">{f.label}</span>
-            <span className="text-[9px] opacity-70">{f.sub}</span>
-          </button>
-        ))}
+      {/* Format */}
+      <div className="flex flex-col gap-2">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Format</div>
+        <div className="grid grid-cols-3 gap-2">
+          {FORMATS.map((f) => {
+            const active = config.format === f.id
+            return (
+              <button
+                key={f.id}
+                onClick={() => handleFormatChange(f.id)}
+                disabled={disabled}
+                className={cn(
+                  'flex flex-col items-center gap-1 py-3 rounded-lg border transition-all',
+                  active
+                    ? 'bg-blue-50 border-blue-200 text-blue-700'
+                    : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed'
+                )}
+              >
+                <span className="text-sm font-bold font-mono">{f.label}</span>
+                <span className="text-[9px] opacity-60">{f.sub}</span>
+              </button>
+            )
+          })}
+        </div>
       </div>
 
+      {/* Bitrate */}
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wide">Bitrate</label>
-          <span className="font-mono text-sm font-semibold text-indigo-600">{config.bitrate} kbps</span>
+          <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Bitrate</div>
+          <span className="text-sm font-bold font-mono text-blue-600">{config.bitrate} kbps</span>
         </div>
         <div className="flex gap-1.5">
-          {bitrates.map((br) => (
-            <button key={br} onClick={() => onChange({ bitrate: br })} disabled={disabled}
-              className="flex-1 py-1.5 rounded-lg text-xs font-mono font-medium transition-all disabled:opacity-50"
-              style={config.bitrate === br ? {
-                background: 'linear-gradient(135deg,#7c3aed,#4f46e5)', color: '#fff',
-                boxShadow: '0 2px 8px rgba(99,102,241,0.25)',
-              } : { background: '#f1f5f9', color: '#64748b' }}>
-              {br}
-            </button>
-          ))}
+          {bitrates.map((br) => {
+            const active = config.bitrate === br
+            return (
+              <button
+                key={br}
+                onClick={() => onChange({ bitrate: br })}
+                disabled={disabled}
+                className={cn(
+                  'flex-1 py-1.5 rounded-md text-[11px] font-mono font-semibold border transition-all',
+                  active
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm shadow-blue-200'
+                    : 'bg-slate-50 border-slate-200 text-slate-500 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed'
+                )}
+              >
+                {br}
+              </button>
+            )
+          })}
         </div>
       </div>
 
-      {!bare && (
-        <div className="flex items-center justify-between text-[10px] rounded-lg px-3 py-2 bg-slate-50 border border-slate-100 text-slate-400">
-          <span>Datenstrom</span>
-          <span className="font-mono text-slate-500">
-            ≈ {(config.bitrate / 8).toFixed(1)} KB/s · {((config.bitrate / 8 / 1024) * 3600).toFixed(1)} GB/h
-          </span>
-        </div>
-      )}
+      {/* Stream info */}
+      <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-[10px] font-mono">
+        <span className="text-muted-foreground">Datenstrom</span>
+        <span className="text-slate-600">
+          ≈ {(config.bitrate / 8).toFixed(1)} KB/s · {((config.bitrate / 8 * 3600) / 1024).toFixed(0)} MB/h
+        </span>
+      </div>
+
     </div>
   )
 }

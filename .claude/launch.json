@@ -2,6 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "opencast-backend",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "echo serving on 8765"],
+      "port": 8765
+    },
+    {
       "name": "opencast-frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
