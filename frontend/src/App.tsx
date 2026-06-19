@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import {
   Radio, AlertCircle,
-  LayoutDashboard, Mic, Video, BarChart2, FileText,
+  Mic, Video, BarChart2, FileText,
   Clock, Users, Activity, Wifi, WifiOff, Plus, Trash2,
 } from 'lucide-react'
 
@@ -23,15 +23,14 @@ import {
   makeServerEntry, DEFAULT_ENCODER,
 } from './types'
 
-// ─── Nav ─────────────────────────────────────────────────────────────────────
-type NavPage = 0 | 2 | 3 | 4 | 6
+// ─── Secondary nav (placeholder pages inside inspector) ───────────────────────
+type SecondaryPage = 'quellen' | 'aufnahmen' | 'statistiken' | 'protokolle' | null
 
-const NAV = [
-  { page: 0 as NavPage, Icon: LayoutDashboard, label: 'ÜBERSICHT'   },
-  { page: 2 as NavPage, Icon: Mic,             label: 'QUELLEN'     },
-  { page: 3 as NavPage, Icon: Video,           label: 'AUFNAHMEN'   },
-  { page: 4 as NavPage, Icon: BarChart2,       label: 'STATISTIKEN' },
-  { page: 6 as NavPage, Icon: FileText,        label: 'PROTOKOLLE'  },
+const SECONDARY_NAV: { id: SecondaryPage; Icon: typeof Mic; label: string }[] = [
+  { id: 'quellen',     Icon: Mic,      label: 'Quellen'     },
+  { id: 'aufnahmen',   Icon: Video,    label: 'Aufnahmen'   },
+  { id: 'statistiken', Icon: BarChart2, label: 'Statistiken' },
+  { id: 'protokolle',  Icon: FileText, label: 'Protokolle'  },
 ]
 
 const EMPTY_LEVELS: LevelUpdate = { left: -120, right: -120 }
@@ -159,15 +158,6 @@ function StreamCard({
   )
 }
 
-function Placeholder({ label }: { label: string }) {
-  return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-2.5 text-muted-foreground">
-      <div className="text-sm font-semibold">{label}</div>
-      <div className="text-xs opacity-50">Noch nicht implementiert</div>
-    </div>
-  )
-}
-
 // ─── App ─────────────────────────────────────────────────────────────────────
 export default function App() {
   const [token, setTokenState] = useState(() => {
@@ -185,7 +175,7 @@ export default function App() {
   const [selectedServerId, setSelectedServerId] = useState<string>('')
   const [encoderConfig, setEncoderConfig]       = useState<EncoderConfig>(DEFAULT_ENCODER)
   const [selectedDevice, setSelectedDevice]     = useState('')
-  const [navPage, setNavPage]                   = useState<NavPage>(0)
+  const [secondaryPage, setSecondaryPage]       = useState<SecondaryPage>(null)
   const [allStatuses, setAllStatuses]           = useState<AllStreamStatus>({})
   const [levels, setLevels]                     = useState<LevelUpdate>(EMPTY_LEVELS)
   const [error, setError]                       = useState<string | null>(null)
@@ -325,75 +315,43 @@ export default function App() {
   return (
     <div className="h-screen flex bg-slate-100 overflow-hidden p-3 gap-3" style={{ fontFamily: 'Inter, system-ui, sans-serif' }}>
 
-      {/* ── Icon Rail ── */}
-      <nav className="w-12 bg-white rounded-2xl shadow-sm border border-border flex-shrink-0 flex flex-col items-center py-3 gap-0.5">
-        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-700 to-blue-500 flex items-center justify-center shadow-lg shadow-blue-200 mb-3 flex-shrink-0">
-          <Radio size={13} className="text-white" />
-        </div>
-
-        {NAV.map(({ page, Icon, label }) => {
-          const active = navPage === page
-          return (
-            <button
-              key={page}
-              title={label}
-              onClick={() => setNavPage(page)}
-              className={cn(
-                'w-8 h-8 rounded-md flex items-center justify-center transition-all',
-                active
-                  ? 'bg-blue-50 text-blue-600'
-                  : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
-              )}
-            >
-              <Icon size={15} />
-            </button>
-          )
-        })}
-
-        <div className="flex-1" />
-        <span className="text-[8px] font-mono text-slate-300">1.0</span>
-      </nav>
-
-      {/* ── Inspector ── */}
+      {/* ── Inspector / Sidebar ── */}
       <aside className="w-72 bg-white rounded-2xl shadow-sm border border-border flex-shrink-0 flex flex-col overflow-hidden">
 
-        {/* Header */}
-        <div className="px-4 py-3.5 border-b border-border flex-shrink-0">
-          {selectedServer ? (
-            <div className="flex items-center gap-2">
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-bold text-foreground truncate">{selectedServer.label}</div>
-                <div className="text-[10px] text-muted-foreground">Stream-Einstellungen</div>
-              </div>
-              {!allStatuses[selectedServer.id] && (
-                <Button
-                  variant="ghost" size="icon"
-                  onClick={() => removeServer(selectedServer.id)}
-                  className="h-6 w-6 text-slate-300 hover:text-red-500 flex-shrink-0"
-                >
-                  <Trash2 size={11} />
-                </Button>
-              )}
-            </div>
-          ) : (
-            <>
-              <div className="text-xs font-bold text-foreground">Einstellungen</div>
-              <div className="text-[10px] text-muted-foreground">Gerät &amp; Encoder</div>
-            </>
-          )}
+        {/* App header */}
+        <div className="px-4 py-3.5 border-b border-border flex items-center gap-2.5 flex-shrink-0">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-700 to-blue-500 flex items-center justify-center shadow-lg shadow-blue-200 flex-shrink-0">
+            <Radio size={13} className="text-white" />
+          </div>
+          <div>
+            <div className="text-[13px] font-bold text-slate-900 leading-none">Opencast</div>
+            <div className="text-[9px] text-slate-400 leading-none mt-0.5">Source Client</div>
+          </div>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {selectedServer ? (
-            <ServerPanel
-              label={selectedServer.label}
-              config={selectedServer.config}
-              disabled={!!allStatuses[selectedServer.id]}
-              onChange={(p) => updateServerConfig(selectedServer.id, p)}
-              onLabelChange={(l) => updateServer(selectedServer.id, { label: l })}
-            />
-          ) : (
+        {/* Secondary nav tabs */}
+        <div className="flex border-b border-border flex-shrink-0">
+          {SECONDARY_NAV.map(({ id, Icon, label }) => (
+            <button
+              key={id}
+              title={label}
+              onClick={() => setSecondaryPage(secondaryPage === id ? null : id)}
+              className={cn(
+                'flex-1 flex flex-col items-center gap-0.5 py-2 text-[9px] font-semibold tracking-wide transition-colors border-b-2',
+                secondaryPage === id
+                  ? 'border-blue-500 text-blue-600 bg-blue-50/50'
+                  : 'border-transparent text-slate-400 hover:text-slate-600 hover:bg-slate-50'
+              )}
+            >
+              <Icon size={12} />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Quellen tab: device + encoder */}
+        {secondaryPage === 'quellen' && (
+          <div className="flex-1 overflow-y-auto p-4">
             <div className="flex flex-col gap-6">
               <div>
                 <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-3">
@@ -418,70 +376,123 @@ export default function App() {
                 />
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
+
+        {/* Other placeholder tabs */}
+        {secondaryPage && secondaryPage !== 'quellen' && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-2 text-muted-foreground p-4">
+            <div className="text-xs font-semibold">
+              {SECONDARY_NAV.find((n) => n.id === secondaryPage)?.label}
+            </div>
+            <div className="text-[10px] opacity-50 text-center">Noch nicht implementiert</div>
+          </div>
+        )}
+
+        {/* Inspector content (shown when no tab is open) */}
+        {!secondaryPage && (
+          <>
+            {/* Inspector header */}
+            <div className="px-4 py-3 border-b border-border flex-shrink-0">
+              {selectedServer ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-foreground truncate">{selectedServer.label}</div>
+                    <div className="text-[10px] text-muted-foreground">Stream-Einstellungen</div>
+                  </div>
+                  {!allStatuses[selectedServer.id] && (
+                    <Button
+                      variant="ghost" size="icon"
+                      onClick={() => removeServer(selectedServer.id)}
+                      className="h-6 w-6 text-slate-300 hover:text-red-500 flex-shrink-0"
+                    >
+                      <Trash2 size={11} />
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div className="text-xs font-bold text-foreground">Inspector</div>
+                  <div className="text-[10px] text-muted-foreground">Karte auswählen</div>
+                </>
+              )}
+            </div>
+
+            {/* Inspector body */}
+            <div className="flex-1 overflow-y-auto p-4">
+              {selectedServer ? (
+                <ServerPanel
+                  label={selectedServer.label}
+                  config={selectedServer.config}
+                  disabled={!!allStatuses[selectedServer.id]}
+                  onChange={(p) => updateServerConfig(selectedServer.id, p)}
+                  onLabelChange={(l) => updateServer(selectedServer.id, { label: l })}
+                />
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center gap-2 py-16 text-center">
+                  <Radio size={20} className="text-slate-200" />
+                  <p className="text-[10px] text-muted-foreground leading-relaxed">
+                    Stream-Karte anklicken<br />um Einstellungen zu bearbeiten
+                  </p>
+                </div>
+              )}
+            </div>
+          </>
+        )}
 
       </aside>
 
       {/* ── Content ── */}
       <main className="flex-1 overflow-hidden flex flex-col bg-white rounded-2xl shadow-sm border border-border">
-
-        {/* ═══ ÜBERSICHT ═══ */}
-        {navPage === 0 && (
-          <div
-            className="flex-1 overflow-y-auto p-5"
-            onClick={() => setSelectedServerId('')}
-          >
-            {/* Monitoring indicator */}
-            {!anyRunning && monitoring && (
-              <div className="mb-4 flex items-center gap-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
-                <span className="text-[10px] text-violet-500 font-semibold tracking-wider">MONITORING</span>
-              </div>
-            )}
-
-            {/* Error */}
-            {error && (
-              <div className="flex items-start gap-2 mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
-                <AlertCircle size={13} className="text-red-500 mt-0.5 flex-shrink-0" />
-                <span className="text-xs text-red-600 leading-relaxed">{error}</span>
-              </div>
-            )}
-
-            {/* Stream cards */}
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-4">
-              {servers.map((server) => (
-                <StreamCard
-                  key={server.id}
-                  server={server}
-                  status={allStatuses[server.id] ?? null}
-                  isLoading={loadingIds.has(server.id)}
-                  levels={levels}
-                  selected={selectedServerId === server.id}
-                  onSelect={() => setSelectedServerId(
-                    selectedServerId === server.id ? '' : server.id
-                  )}
-                  onStart={() => handleStart(server.id)}
-                  onStop={() => handleStop(server.id)}
-                />
-              ))}
-
-              {/* Add server tile */}
-              <button
-                onClick={(e) => { e.stopPropagation(); addServer() }}
-                className="min-h-48 rounded-xl border-2 border-dashed border-slate-200 text-slate-400 hover:border-teal-300 hover:text-teal-500 hover:bg-teal-50/30 transition-all flex flex-col items-center justify-center gap-2.5"
-              >
-                <Plus size={20} />
-                <span className="text-xs font-semibold">Server hinzufügen</span>
-              </button>
+        <div
+          className="flex-1 overflow-y-auto p-5"
+          onClick={() => setSelectedServerId('')}
+        >
+          {/* Monitoring indicator */}
+          {!anyRunning && monitoring && (
+            <div className="mb-4 flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+              <span className="text-[10px] text-violet-500 font-semibold tracking-wider">MONITORING</span>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ═══ Placeholder pages ═══ */}
-        {([2, 3, 4, 6] as NavPage[]).includes(navPage) && (
-          <Placeholder label={NAV.find((n) => n.page === navPage)?.label ?? ''} />
-        )}
+          {/* Error */}
+          {error && (
+            <div className="flex items-start gap-2 mb-4 bg-red-50 border border-red-200 rounded-lg px-3 py-2.5">
+              <AlertCircle size={13} className="text-red-500 mt-0.5 flex-shrink-0" />
+              <span className="text-xs text-red-600 leading-relaxed">{error}</span>
+            </div>
+          )}
+
+          {/* Stream cards */}
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-4">
+            {servers.map((server) => (
+              <StreamCard
+                key={server.id}
+                server={server}
+                status={allStatuses[server.id] ?? null}
+                isLoading={loadingIds.has(server.id)}
+                levels={levels}
+                selected={selectedServerId === server.id}
+                onSelect={() => {
+                  setSecondaryPage(null)
+                  setSelectedServerId(selectedServerId === server.id ? '' : server.id)
+                }}
+                onStart={() => handleStart(server.id)}
+                onStop={() => handleStop(server.id)}
+              />
+            ))}
+
+            {/* Add server tile */}
+            <button
+              onClick={(e) => { e.stopPropagation(); addServer() }}
+              className="min-h-48 rounded-xl border-2 border-dashed border-slate-200 text-slate-400 hover:border-teal-300 hover:text-teal-500 hover:bg-teal-50/30 transition-all flex flex-col items-center justify-center gap-2.5"
+            >
+              <Plus size={20} />
+              <span className="text-xs font-semibold">Server hinzufügen</span>
+            </button>
+          </div>
+        </div>
 
         <StatusBar allStatuses={allStatuses} wsConnected={wsConnected} />
       </main>
