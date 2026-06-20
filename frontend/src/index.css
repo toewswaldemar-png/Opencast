@@ -4,26 +4,26 @@
 
 @layer base {
   :root {
-    --background:   0 0% 100%;
-    --foreground:   222 47% 11%;
-    --card:         0 0% 100%;
-    --card-foreground: 222 47% 11%;
-    --popover:      0 0% 100%;
-    --popover-foreground: 222 47% 11%;
-    --primary:      221 83% 53%;
-    --primary-foreground: 210 40% 98%;
-    --secondary:    210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted:        210 40% 96%;
-    --muted-foreground: 215 16% 47%;
-    --accent:       210 40% 96%;
-    --accent-foreground: 222 47% 11%;
-    --destructive:  0 84% 60%;
-    --destructive-foreground: 210 40% 98%;
-    --border:       214 32% 91%;
-    --input:        214 32% 91%;
-    --ring:         221 83% 53%;
-    --radius:       0.5rem;
+    --background:             210 20% 98%;
+    --foreground:             222 47% 11%;
+    --card:                   0 0% 100%;
+    --card-foreground:        222 47% 11%;
+    --popover:                0 0% 100%;
+    --popover-foreground:     222 47% 11%;
+    --primary:                221 83% 53%;
+    --primary-foreground:     210 40% 98%;
+    --secondary:              210 16% 93%;
+    --secondary-foreground:   222 47% 20%;
+    --muted:                  210 16% 93%;
+    --muted-foreground:       215 16% 47%;
+    --accent:                 210 16% 90%;
+    --accent-foreground:      222 47% 11%;
+    --destructive:            0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border:                 214 20% 88%;
+    --input:                  214 20% 88%;
+    --ring:                   221 83% 53%;
+    --radius:                 0.75rem;
   }
 
   * { box-sizing: border-box; }
@@ -36,15 +36,15 @@
   }
 
   body {
-    background: hsl(210 40% 96%);
+    background: hsl(var(--background));
     min-height: 100vh;
     margin: 0;
   }
 
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: hsl(215 20% 80%); border-radius: 9999px; }
-  ::-webkit-scrollbar-thumb:hover { background: hsl(215 16% 65%); }
+  ::-webkit-scrollbar-thumb { background: hsl(214 20% 78%); border-radius: 9999px; }
+  ::-webkit-scrollbar-thumb:hover { background: hsl(214 20% 65%); }
 
   input[type=number]::-webkit-inner-spin-button,
   input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; }

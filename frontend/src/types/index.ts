@@ -15,6 +15,7 @@ export interface AudioDevice {
 export interface ServerConfig {
   host: string
   port: number
+  username: string
   password: string
   mountPoint: string
   protocol: IcecastProtocol
@@ -26,11 +27,17 @@ export interface ServerConfig {
   public: boolean
 }
 
+export type EncoderMode   = 'cbr' | 'vbr'
+export type StereoMode    = 'auto' | 'stereo' | 'joint' | 'mono'
+
 export interface EncoderConfig {
-  format: StreamFormat
-  bitrate: number
+  format:     StreamFormat
+  bitrate:    number
   sampleRate: number
-  channels: number
+  channels:   number
+  mode:       EncoderMode
+  quality:    number
+  stereoMode: StereoMode
 }
 
 export interface StreamConfig {
@@ -77,6 +84,7 @@ export const SAMPLE_RATES = [22050, 32000, 44100, 48000] as const
 export const DEFAULT_SERVER: ServerConfig = {
   host: 'localhost',
   port: 8000,
+  username: 'source',
   password: 'hackme',
   mountPoint: '/stream',
   protocol: 'icecast2',
@@ -88,10 +96,13 @@ export const DEFAULT_SERVER: ServerConfig = {
   public: false,
 }
 export const DEFAULT_ENCODER: EncoderConfig = {
-  format: 'mp3',
-  bitrate: 192,
+  format:     'mp3',
+  bitrate:    192,
   sampleRate: 44100,
-  channels: 2,
+  channels:   2,
+  mode:       'cbr',
+  quality:    4,
+  stereoMode: 'auto',
 }
 
 export interface ServerEntry {
@@ -107,3 +118,21 @@ export function makeServerEntry(label = 'Neuer Server'): ServerEntry {
     config: { ...DEFAULT_SERVER },
   }
 }
+
+export interface LogEntry {
+  id: string
+  time: string
+  event: string
+  details: string
+  type: 'ok' | 'warn' | 'error' | 'info'
+  streamId: string
+}
+
+export interface ChartPoint {
+  time: number
+  value: number
+}
+
+export type ChartHistory = Record<string, { bitrate: ChartPoint[]; listeners: ChartPoint[] }>
+
+export type NavPage = 'streams' | 'aufnahmen' | 'statistiken' | 'protokolle' | 'einstellungen'

@@ -1,33 +1,60 @@
-import { Wifi, WifiOff, Radio } from 'lucide-react'
 import { AllStreamStatus } from '../types'
 import { cn } from '@/lib/utils'
 
-interface Props { allStatuses: AllStreamStatus; wsConnected: boolean }
+interface Props {
+  allStatuses: AllStreamStatus
+  wsConnected: boolean
+}
+
+function MiniBar({ value, max, color }: { value: number; max: number; color: string }) {
+  const pct = Math.min(100, (value / max) * 100)
+  return (
+    <div className="w-16 h-1 rounded-full bg-muted overflow-hidden">
+      <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+    </div>
+  )
+}
 
 export default function StatusBar({ allStatuses, wsConnected }: Props) {
-  const liveCount = Object.values(allStatuses).filter((s) => s.connected).length
+  const liveCount    = Object.values(allStatuses).filter((s) => s.connected).length
+  const totalBitrate = Object.values(allStatuses).reduce((sum, s) => sum + (s.bitrate ?? 0), 0)
+  const allOk        = wsConnected && Object.values(allStatuses).every((s) => s.connected || !s.running)
 
   return (
-    <div className="flex items-center justify-between px-4 py-1 border-t border-black/[0.06] bg-white/80 text-[10px] font-mono text-slate-400 flex-shrink-0">
-      <div className="flex items-center gap-4">
-        <div className="flex items-center gap-1.5">
-          {wsConnected
-            ? <Wifi size={10} className="text-green-500" />
-            : <WifiOff size={10} className="text-red-500" />}
-          <span className={cn(wsConnected ? 'text-green-600' : 'text-red-500')}>
-            {wsConnected ? 'Verbunden' : 'Getrennt'}
-          </span>
-        </div>
+    <div className="flex items-center gap-6 px-4 py-1.5 bg-card border-t border-border text-[10px] font-mono text-muted-foreground flex-shrink-0">
+
+      <div className="flex items-center gap-2">
+        <span>CPU</span>
+        <MiniBar value={2} max={100} color="#1D9E75" />
+        <span>2%</span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span>RAM</span>
+        <MiniBar value={128} max={512} color="#185FA5" />
+        <span>128 MB</span>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span>Netzwerk</span>
+        <MiniBar value={totalBitrate} max={2000} color="#534AB7" />
+        <span>{totalBitrate > 0 ? `${(totalBitrate / 8).toFixed(0)} KB/s` : '—'}</span>
+      </div>
+
+      <div className="ml-auto flex items-center gap-4">
         {liveCount > 0 && (
           <div className="flex items-center gap-1.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-red-500 inline-block" />
-            <span className="text-red-500 font-bold tracking-widest">{liveCount}× LIVE</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+            <span className="text-red-600 font-bold tracking-widest">{liveCount}× LIVE</span>
           </div>
         )}
-      </div>
-      <div className="flex items-center gap-1.5 text-slate-400">
-        <Radio size={9} />
-        <span>Source Client</span><span>·</span><span>v1.0</span>
+        <div className="flex items-center gap-1.5">
+          <span className={cn('w-1.5 h-1.5 rounded-full', allOk ? 'bg-teal-500' : 'bg-amber-400')} />
+          <span className={cn(allOk ? 'text-teal-600' : 'text-amber-600')}>
+            {allOk ? 'Alle Systeme bereit' : wsConnected ? 'Stream-Fehler' : 'Verbindungsfehler'}
+          </span>
+        </div>
+        <span>Opencast v1.0.0</span>
       </div>
     </div>
   )
