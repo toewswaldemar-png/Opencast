@@ -51,10 +51,25 @@ func NewClient(cfg ServerConfig) *Client {
 }
 
 func (c *Client) Connect() error {
-	addr := fmt.Sprintf("%s:%d", c.cfg.Host, c.cfg.Port)
+	host := c.cfg.Host
+	port := strconv.Itoa(c.cfg.Port)
+
+	// Prefer IPv4 when resolving hostnames like "localhost" — many Icecast
+	// installations only bind 127.0.0.1, not [::1], so dialing tcp with the
+	// default resolver order (which picks IPv6 first on Windows) would fail.
+	if addrs, err := net.LookupHost(host); err == nil {
+		for _, a := range addrs {
+			if net.ParseIP(a).To4() != nil {
+				host = a
+				break
+			}
+		}
+	}
+
+	addr := net.JoinHostPort(host, port)
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		return fmt.Errorf("dial %s: %w", addr, err)
+		return fmt.Errorf("dial %s:%s: %w", c.cfg.Host, port, err)
 	}
 	c.conn = conn
 
