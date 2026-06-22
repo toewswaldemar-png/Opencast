@@ -117,17 +117,21 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 
 		var errBuf [256]C.char
 
+		t0 := time.Now()
 		if C.asio_open_driver(cClsid, &errBuf[0], 256) != 0 {
 			errCh <- fmt.Errorf("ASIO-Treiber konnte nicht geöffnet werden: %s", C.GoString(&errBuf[0]))
 			return
 		}
+		log.Printf("[asio] open_driver: %v", time.Since(t0).Round(time.Millisecond))
 
+		t1 := time.Now()
 		var numInputCh C.long
 		var defSR C.double
 		if C.asio_get_driver_info(&numInputCh, &defSR, &errBuf[0], 256) != 0 {
 			errCh <- fmt.Errorf("ASIO-Treiberinfo: %s", C.GoString(&errBuf[0]))
 			return
 		}
+		log.Printf("[asio] get_driver_info: %v", time.Since(t1).Round(time.Millisecond))
 
 		numCh := int(c.cfg.Channels)
 		if numCh > int(numInputCh) {
@@ -150,6 +154,7 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 		globalASIOCapturerMu.Unlock()
 
 		sr := C.double(c.cfg.SampleRate)
+		t2 := time.Now()
 		if C.asio_start_capture(&channels[0], C.int(numCh), prefBuf, sr, &errBuf[0], 256) != 0 {
 			globalASIOCapturerMu.Lock()
 			globalASIOCapturer = nil
@@ -157,8 +162,10 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 			errCh <- fmt.Errorf("ASIO-Aufnahme konnte nicht gestartet werden: %s", C.GoString(&errBuf[0]))
 			return
 		}
+		log.Printf("[asio] start_capture: %v", time.Since(t2).Round(time.Millisecond))
 
-		log.Printf("[asio] Capture gestartet: ch=%d bufSz=%d sr=%.0f", numCh, int(prefBuf), float64(sr))
+		log.Printf("[asio] Capture gestartet: ch=%d bufSz=%d sr=%.0f (gesamt: %v)",
+			numCh, int(prefBuf), float64(sr), time.Since(t0).Round(time.Millisecond))
 		close(errCh)
 
 		go func() {
