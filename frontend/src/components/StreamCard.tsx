@@ -355,7 +355,7 @@ function EncoderTab({ encoderConfig, disabled, onEncoderChange }: {
 
 // ── Status badge ──────────────────────────────────────────────────────────────
 
-function StatusBadge({ isLive, isReconnecting }: { isLive: boolean; isReconnecting: boolean }) {
+function StatusBadge({ isLive, isReconnecting, isConnecting }: { isLive: boolean; isReconnecting: boolean; isConnecting: boolean }) {
   if (isLive) return (
     <span className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-600 flex-shrink-0">
       <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />Live
@@ -364,6 +364,11 @@ function StatusBadge({ isLive, isReconnecting }: { isLive: boolean; isReconnecti
   if (isReconnecting) return (
     <span className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-600 flex-shrink-0">
       <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />Reconnect
+    </span>
+  )
+  if (isConnecting) return (
+    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-blue-500 flex-shrink-0">
+      <RefreshCw size={10} className="animate-spin" />Verbindet…
     </span>
   )
   return (
@@ -404,6 +409,7 @@ interface Props {
   selectedDevice:  string
   anyRunning:      boolean
   isLoading:       boolean
+  error?:          string | null
   onStart:         () => void
   onStop:          () => void
   onChange:        (p: Partial<ServerConfig>) => void
@@ -417,12 +423,20 @@ interface Props {
 
 export default function StreamCard({
   entry, status, levels, encoderConfig, selectedDevice, anyRunning,
-  isLoading, onStart, onStop, onChange, onLabelChange, onDeviceChange, onEncoderChange, onRemove,
+  isLoading, error, onStart, onStop, onChange, onLabelChange, onDeviceChange, onEncoderChange, onRemove,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [log, setLog]                   = useState<LogLine[]>([])
+  const [nowPlaying, setNowPlaying]     = useState('')
   const logIdRef                        = useRef(0)
   const prevStatusRef                   = useRef<StreamStatus | null>(null)
+  const metaTimerRef                    = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (error) {
+      setLog((l) => [...l.slice(-9), { id: logIdRef.current++, time: new Date(), text: error, type: 'warn' }])
+    }
+  }, [error]) // eslint-disable-line
 
   useEffect(() => {
     const prev = prevStatusRef.current
@@ -430,16 +444,46 @@ export default function StreamCard({
     const add = (text: string, type: LogLine['type']) =>
       setLog((l) => [...l.slice(-9), { id: logIdRef.current++, time: new Date(), text, type }])
 
-    if      (curr?.connected  && !prev?.connected)               add('Verbunden', 'ok')
+    if      (curr?.connected  && !prev?.connected)                add('Verbunden', 'ok')
     else if (!curr?.connected && prev?.connected && curr?.running) add('Verbindung unterbrochen', 'warn')
-    else if (curr?.reconnecting && !prev?.reconnecting)           add('Verbindungsversuch…', 'info')
-    else if (prev?.running && !curr?.running)                     add('Getrennt', 'info')
+    else if (curr?.reconnecting && !prev?.reconnecting)            add('Verbindungsversuch…', 'info')
+    else if (prev?.running && !curr?.running)                      add('Getrennt', 'info')
 
     prevStatusRef.current = curr
   }, [status]) // eslint-disable-line
 
+  // Send now-playing metadata with debounce
+  const handleNowPlayingChange = (val: string) => {
+    setNowPlaying(val)
+    if (metaTimerRef.current) clearTimeout(metaTimerRef.current)
+    if (!isLive) return
+    metaTimerRef.current = setTimeout(() => {
+      apiFetch('/api/stream/metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ streamId: entry.id, title: val }),
+      }).catch(() => {})
+    }, 800) as unknown as number
+  }
+
+  // Also send when stream goes live (in case a title was already typed)
+  const prevLiveRef = useRef(false)
+  useEffect(() => {
+    const wasLive = prevLiveRef.current
+    const live    = !!(status?.running && status?.connected)
+    if (live && !wasLive && nowPlaying) {
+      apiFetch('/api/stream/metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ streamId: entry.id, title: nowPlaying }),
+      }).catch(() => {})
+    }
+    prevLiveRef.current = live
+  }, [status?.running, status?.connected]) // eslint-disable-line
+
   const isLive         = !!(status?.running && status?.connected)
-  const isReconnecting = !!(status?.running && !status?.connected)
+  const isReconnecting = !!(status?.running && !status?.connected && status?.reconnecting)
+  const isConnecting   = !!(status?.running && !status?.connected && !status?.reconnecting)
   const displayLevels  = levels
 
   return (
@@ -447,6 +491,7 @@ export default function StreamCard({
       'flex flex-col rounded-xl border bg-card overflow-hidden transition-all duration-200',
       isLive         && 'border-blue-400/50 shadow-lg shadow-blue-500/10',
       isReconnecting && 'border-amber-500/20',
+      isConnecting   && 'border-blue-400/20',
       !status?.running && 'border-border',
     )}>
 
@@ -454,8 +499,9 @@ export default function StreamCard({
       <div className="flex items-center gap-3 px-4 pt-4 pb-2">
         <div className={cn(
           'w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0',
-          isLive         ? 'bg-blue-600/10 text-blue-600'
+          isLive           ? 'bg-blue-600/10 text-blue-600'
           : isReconnecting ? 'bg-amber-500/10 text-amber-600'
+          : isConnecting   ? 'bg-blue-500/10 text-blue-500'
           :                  'bg-muted text-muted-foreground',
         )}>
           <Mic size={15} />
@@ -466,7 +512,7 @@ export default function StreamCard({
             {entry.config.host}:{entry.config.port}{entry.config.mountPoint}
           </p>
         </div>
-        <StatusBadge isLive={isLive} isReconnecting={isReconnecting} />
+        <StatusBadge isLive={isLive} isReconnecting={isReconnecting} isConnecting={isConnecting} />
         {onRemove && !status?.running && settingsOpen && (
           <Button variant="ghost" size="icon"
             className="h-7 w-7 flex-shrink-0 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
@@ -494,13 +540,26 @@ export default function StreamCard({
       <div className="min-h-[224px]">
       {!settingsOpen ? (
         <>
-          {/* Metadata */}
+          {/* Now Playing / Metadata */}
           <div className="flex items-center gap-2 px-4 pb-3">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-muted-foreground/50 flex-shrink-0">
               <circle cx="12" cy="12" r="2"/>
               <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/>
             </svg>
-            <span className="flex-1 text-[11px] text-muted-foreground truncate">Kein Titel · Unbekannt</span>
+            {isLive ? (
+              <input
+                className="flex-1 text-[11px] font-mono bg-transparent border-b border-border/50
+                           focus:border-blue-400 outline-none text-foreground placeholder:text-muted-foreground/50
+                           transition-colors"
+                placeholder="Titel · Interpret"
+                value={nowPlaying}
+                onChange={(e) => handleNowPlayingChange(e.target.value)}
+              />
+            ) : (
+              <span className="flex-1 text-[11px] text-muted-foreground truncate">
+                {nowPlaying || 'Kein Titel · Unbekannt'}
+              </span>
+            )}
             <span className="text-[11px] font-mono font-semibold text-primary flex-shrink-0">
               {encoderConfig.format.toUpperCase()} · {encoderConfig.bitrate}K
             </span>
@@ -531,9 +590,27 @@ export default function StreamCard({
           {/* Stats */}
           <div className="grid grid-cols-3 border-t border-border">
             {([
-              { icon: 'clock',    label: 'UPTIME',  value: status?.uptime ? formatUptime(status.uptime) : '00:00:00', mono: true,  accent: isLive },
-              { icon: 'users',    label: 'HÖRER',   value: '—',                                                        mono: false, accent: false  },
-              { icon: 'activity', label: 'BITRATE', value: status?.bitrate ? String(status.bitrate) : '—',            mono: false, accent: false  },
+              {
+                icon:   'clock',
+                label:  'UPTIME',
+                value:  status?.uptime ? formatUptime(status.uptime) : '00:00:00',
+                mono:   true,
+                accent: isLive,
+              },
+              {
+                icon:   'users',
+                label:  'HÖRER',
+                value:  isLive && status?.listeners != null ? String(status.listeners) : '—',
+                mono:   false,
+                accent: false,
+              },
+              {
+                icon:   'activity',
+                label:  'BITRATE',
+                value:  status?.bitrate ? `${status.bitrate}K` : '—',
+                mono:   false,
+                accent: false,
+              },
             ] as const).map(({ icon, label, value, mono, accent }, i) => (
               <div key={label} className={cn('flex flex-col items-center py-3 gap-1', i > 0 && 'border-l border-border')}>
                 <StatIcon name={icon} accent={accent} />
@@ -595,6 +672,11 @@ export default function StreamCard({
           <Button variant="secondary" className="flex-1" onClick={onStart} disabled={isLoading}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
             {isLoading ? 'Verbinde…' : 'Verbinden'}
+          </Button>
+        ) : isConnecting ? (
+          <Button variant="secondary" className="flex-1 opacity-70 cursor-not-allowed" disabled>
+            <RefreshCw size={11} className="animate-spin" />
+            Verbindet…
           </Button>
         ) : (
           <Button variant="outline" className="flex-1 text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/30"

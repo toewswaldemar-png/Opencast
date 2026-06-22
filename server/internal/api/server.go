@@ -48,13 +48,13 @@ func (s *Server) HandleStatus(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/stream/start
 type StartRequest struct {
-	StreamID   string               `json:"streamId"`
-	DeviceID   string               `json:"deviceId"`
-	SampleRate uint32               `json:"sampleRate"`
-	Channels   uint16               `json:"channels"`
-	Format     string               `json:"format"`
-	Bitrate    int                  `json:"bitrate"`
-	Server     config.ServerConfig  `json:"server"`
+	StreamID   string              `json:"streamId"`
+	DeviceID   string              `json:"deviceId"`
+	SampleRate uint32              `json:"sampleRate"`
+	Channels   uint16              `json:"channels"`
+	Format     string              `json:"format"`
+	Bitrate    int                 `json:"bitrate"`
+	Server     config.ServerConfig `json:"server"`
 }
 
 func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
@@ -76,19 +76,31 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.SampleRate == 0 { req.SampleRate = 44100 }
-	if req.Channels == 0   { req.Channels = 2 }
-	if req.Bitrate == 0    { req.Bitrate = 192 }
-	if req.Format == ""    { req.Format = "mp3" }
+	if req.SampleRate == 0 {
+		req.SampleRate = 44100
+	}
+	if req.Channels == 0 {
+		req.Channels = 2
+	}
+	if req.Bitrate == 0 {
+		req.Bitrate = 192
+	}
+	if req.Format == "" {
+		req.Format = "mp3"
+	}
 
 	contentType := formatContentType(req.Format)
 	ingestURL := fmt.Sprintf("%s/ingest/%s", s.baseURL, req.StreamID)
 
-	// Register ingest config so relay knows where to forward
+	// Read global settings (autoReconnect) from stored config.
+	storedCfg := s.store.Get()
+	autoReconnect := storedCfg.AutoReconnect != nil && *storedCfg.AutoReconnect
+
 	s.relay.Register(req.StreamID, ingest.StreamConfig{
 		IcecastCfg: icecast.ServerConfig{
 			Host:        req.Server.Host,
 			Port:        req.Server.Port,
+			Username:    req.Server.Username,
 			Password:    req.Server.Password,
 			MountPoint:  req.Server.MountPoint,
 			Protocol:    icecast.Protocol(req.Server.Protocol),
@@ -99,10 +111,11 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 			URL:         req.Server.URL,
 			Public:      req.Server.Public,
 		},
-		ContentType: contentType,
+		ContentType:   contentType,
+		AutoReconnect: autoReconnect,
+		Bitrate:       req.Bitrate,
 	})
 
-	// Send start command to Windows client
 	sent := s.clientHub.Send(ClientCmd{
 		Type: "cmd:start",
 		Payload: CmdStartPayload{
@@ -143,6 +156,23 @@ func (s *Server) HandleStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
 }
 
+// POST /api/stream/metadata — sends now-playing title to Icecast
+func (s *Server) HandleMetadata(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		StreamID string `json:"streamId"`
+		Title    string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.relay.UpdateMetadata(req.StreamID, req.Title); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // POST /api/monitor/start
 func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 	var cfg CmdMonitorPayload
@@ -180,15 +210,28 @@ func (s *Server) HandleAsioPanel(w http.ResponseWriter, r *http.Request) {
 // GET /api/config
 func (s *Server) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Get()
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"servers": cfg.Servers,
-	})
+	}
+	if cfg.DeviceID != "" {
+		out["deviceId"] = cfg.DeviceID
+	}
+	if cfg.Encoder != nil {
+		out["encoder"] = cfg.Encoder
+	}
+	if cfg.AutoReconnect != nil {
+		out["autoReconnect"] = *cfg.AutoReconnect
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // PUT /api/config
 func (s *Server) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	var partial struct {
-		Servers []config.ServerEntry `json:"servers"`
+		Servers       []config.ServerEntry  `json:"servers"`
+		DeviceID      string                `json:"deviceId"`
+		Encoder       *config.EncoderConfig `json:"encoder"`
+		AutoReconnect *bool                 `json:"autoReconnect"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&partial); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -197,6 +240,15 @@ func (s *Server) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	cfg := s.store.Get()
 	if len(partial.Servers) > 0 {
 		cfg.Servers = partial.Servers
+	}
+	if partial.DeviceID != "" {
+		cfg.DeviceID = partial.DeviceID
+	}
+	if partial.Encoder != nil {
+		cfg.Encoder = partial.Encoder
+	}
+	if partial.AutoReconnect != nil {
+		cfg.AutoReconnect = partial.AutoReconnect
 	}
 	if err := s.store.Set(cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

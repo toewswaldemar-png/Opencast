@@ -8,14 +8,17 @@ import (
 )
 
 type ServerEntry struct {
-	ID     string       `json:"id"`
-	Label  string       `json:"label"`
-	Config ServerConfig `json:"config"`
+	ID         string         `json:"id"`
+	Label      string         `json:"label"`
+	Config     ServerConfig   `json:"config"`
+	DeviceID   string         `json:"deviceId,omitempty"`
+	EncoderCfg *EncoderConfig `json:"encoderConfig,omitempty"`
 }
 
 type ServerConfig struct {
 	Host        string `json:"host"`
 	Port        int    `json:"port"`
+	Username    string `json:"username,omitempty"`
 	Password    string `json:"password"`
 	MountPoint  string `json:"mountPoint"`
 	Protocol    string `json:"protocol"`
@@ -27,9 +30,22 @@ type ServerConfig struct {
 	Public      bool   `json:"public"`
 }
 
+type EncoderConfig struct {
+	Format     string `json:"format,omitempty"`
+	Bitrate    int    `json:"bitrate,omitempty"`
+	SampleRate int    `json:"sampleRate,omitempty"`
+	Channels   int    `json:"channels,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	Quality    int    `json:"quality,omitempty"`
+	StereoMode string `json:"stereoMode,omitempty"`
+}
+
 type Config struct {
-	Servers []ServerEntry `json:"servers,omitempty"`
-	Token   string        `json:"token"`
+	Servers       []ServerEntry  `json:"servers,omitempty"`
+	Token         string         `json:"token"`
+	DeviceID      string         `json:"deviceId,omitempty"`
+	Encoder       *EncoderConfig `json:"encoder,omitempty"`
+	AutoReconnect *bool          `json:"autoReconnect,omitempty"`
 }
 
 var defaults = Config{}

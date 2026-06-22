@@ -22,38 +22,10 @@ static IASIO         *g_asio          = nullptr;
 static ASIOBufferInfo g_bufInfos[MAX_ASIO_CHANNELS];
 static long           g_bufferSize    = 0;
 static long           g_sampleType    = ASIOSTInt32LSB;
-static int            g_numChannels   = 0;   // input channels
-static int            g_numOutCh      = 0;   // output channels (duplex)
+static int            g_numChannels   = 0;
+static int            g_numOutCh      = 0;
 static int16_t       *g_pcmBuf        = nullptr;
 static HANDLE         g_stopEvent     = nullptr;
-
-// ── C-level diagnostic log ───────────────────────────────────────────────────
-// Written to <exe-dir>/asio_c_debug.log.  Not real-time safe but diagnostic-only.
-static char g_logPath[MAX_PATH];
-
-static void c_log_init(void) {
-    if (GetModuleFileNameA(nullptr, g_logPath, MAX_PATH) == 0) {
-        strcpy_s(g_logPath, MAX_PATH, "asio_c_debug.log");
-        return;
-    }
-    char *slash = strrchr(g_logPath, '\\');
-    if (slash) *(slash + 1) = '\0'; else g_logPath[0] = '\0';
-    strcat_s(g_logPath, MAX_PATH, "asio_c_debug.log");
-    // Truncate on open to start fresh each run
-    FILE *f = fopen(g_logPath, "w");
-    if (f) fclose(f);
-}
-
-static void c_log(const char *msg) {
-    if (!g_logPath[0]) return;
-    FILE *f = fopen(g_logPath, "a");
-    if (!f) return;
-    DWORD tid = GetCurrentThreadId();
-    fprintf(f, "[TID=%lu] %s\n", (unsigned long)tid, msg);
-    fclose(f);
-}
-
-static volatile long g_cbCount = 0;  // counts asio_buffer_switch_time_info calls
 
 extern "C" void goAsioBufferCallback(void *data, int numFrames, int sampleType, int numChannels);
 
@@ -142,27 +114,20 @@ static void asio_buffer_switch(long idx, ASIOBool directProcess) {
 static void asio_sample_rate_changed(ASIOSampleRate sRate) { (void)sRate; }
 
 static long asio_message(long selector, long value, void *message, double *opt) {
-    (void)message; (void)opt;
-    {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "asio_message: selector=%ld value=%ld", selector, value);
-        c_log(buf);
-    }
+    (void)message; (void)opt; (void)value;
     switch (selector) {
     case kAsioSelectorSupported:
         return (value == kAsioEngineVersion || value == kAsioResetRequest ||
                 value == kAsioSupportsTimeInfo || value == kAsioLatenciesChanged) ? 1L : 0L;
-    case kAsioEngineVersion: return 2L;
-    case kAsioResetRequest:  return 1L;
-    case kAsioSupportsTimeInfo: return 1L;  // ReaRoute requires bufferSwitchTimeInfo
-    case kAsioSupportsTimeCode: return 0L;
-    default: return 0L;
+    case kAsioEngineVersion:     return 2L;
+    case kAsioResetRequest:      return 1L;
+    case kAsioSupportsTimeInfo:  return 1L;  // ReaRoute requires bufferSwitchTimeInfo
+    case kAsioSupportsTimeCode:  return 0L;
+    default:                     return 0L;
     }
 }
 
 static ASIOTime *asio_buffer_switch_time_info(ASIOTime *params, long idx, ASIOBool directProcess) {
-    long n = InterlockedIncrement(&g_cbCount);
-    if (n == 1) c_log("asio_buffer_switch_time_info: FIRST CALL");
     asio_buffer_switch(idx, directProcess);
     return params;
 }
@@ -201,17 +166,7 @@ int asio_enumerate_drivers(ASIORegEntry *drivers, int maxDrivers) {
 }
 
 int asio_open_driver(const char *clsidStr, char *errBuf, int errLen) {
-    c_log_init();
-    g_cbCount = 0;
-    g_numOutCh = 0;
-
     if (g_asio) asio_release_driver();
-
-    {
-        char buf[192];
-        snprintf(buf, sizeof(buf), "asio_open_driver: clsid=%s", clsidStr);
-        c_log(buf);
-    }
 
     CLSID clsid; wchar_t wclsid[64];
     if (MultiByteToWideChar(CP_ACP, 0, clsidStr, -1, wclsid, 64) == 0) {
@@ -233,14 +188,12 @@ int asio_open_driver(const char *clsidStr, char *errBuf, int errLen) {
         CoUninitialize(); return -1;
     }
 
-    c_log("CoCreateInstance OK, calling init()");
     if (!g_asio->init((void *)GetDesktopWindow())) {
         char drvErr[256] = {0};
         g_asio->getErrorMessage(drvErr);
         snprintf(errBuf, errLen, "ASIO init() fehlgeschlagen: %s", drvErr);
         g_asio->Release(); g_asio = nullptr; CoUninitialize(); return -1;
     }
-    c_log("init() OK");
     return 0;
 }
 
@@ -269,7 +222,7 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
 
     // Some virtual ASIO drivers (e.g. ReaRoute) require an explicit setSampleRate
     // call before they will deliver bufferSwitch callbacks, even when the rate
-    // is already correct.  Always call setSampleRate: with the requested rate if
+    // is already correct. Always call setSampleRate: with the requested rate if
     // supported, otherwise with the driver's current rate (which REAPER owns).
     ASIOSampleRate actualSR = 48000.0;
     g_asio->getSampleRate(&actualSR);
@@ -282,7 +235,6 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
             g_asio->setSampleRate(actualSR); // confirm current rate to unblock driver
         }
     }
-    ASIOError err = ASE_OK;
 
     // Input channels
     memset(g_bufInfos, 0, sizeof(g_bufInfos));
@@ -292,7 +244,7 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
     }
 
     // Output channels (duplex): some drivers (including ReaRoute) only activate
-    // input callbacks when the client also registers output channels.  We zero
+    // input callbacks when the client also registers output channels. We zero
     // the output buffers in every callback so they produce silence in REAPER.
     long numInDrv = 0, numOutDrv = 0;
     g_asio->getChannels(&numInDrv, &numOutDrv);
@@ -304,18 +256,7 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
     g_numOutCh = numOut;
 
     long totalCh = (long)(numChannels + numOut);
-    {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "createBuffers: inCh=%d outCh=%d bufSz=%ld sr=%.0f",
-                 numChannels, numOut, bufferSize, actualSR);
-        c_log(buf);
-    }
-    err = g_asio->createBuffers(g_bufInfos, totalCh, bufferSize, &g_callbacks);
-    {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "createBuffers returned: %ld", (long)err);
-        c_log(buf);
-    }
+    ASIOError err = g_asio->createBuffers(g_bufInfos, totalCh, bufferSize, &g_callbacks);
     if (err != ASE_OK) { snprintf(errBuf, errLen, "createBuffers Fehler: %ld", err); return -1; }
 
     // Detect input sample type
@@ -335,13 +276,7 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
         snprintf(errBuf, errLen, "malloc PCM-Puffer fehlgeschlagen"); return -1;
     }
 
-    c_log("calling start()");
     err = g_asio->start();
-    {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "start() returned: %ld", (long)err);
-        c_log(buf);
-    }
     if (err != ASE_OK) {
         free(g_pcmBuf); g_pcmBuf = nullptr;
         g_numChannels = 0; g_bufferSize = 0; g_numOutCh = 0;
@@ -357,7 +292,6 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
         g_asio->disposeBuffers();
         snprintf(errBuf, errLen, "CreateEvent fehlgeschlagen"); return -1;
     }
-    c_log("asio_start_capture OK — waiting for callbacks");
     return 0;
 }
 

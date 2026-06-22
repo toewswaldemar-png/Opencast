@@ -56,6 +56,7 @@ export interface StreamStatus {
   uptime: number
   bytesSent: number
   bitrate: number
+  listeners: number
   format: StreamFormat
 }
 
@@ -69,9 +70,11 @@ export interface LevelUpdate {
 export type AllStreamStatus = Record<string, StreamStatus>
 
 export type WSPayload =
-  | { type: 'level'; payload: LevelUpdate }
-  | { type: 'status'; payload: AllStreamStatus }
-  | { type: 'error'; payload: { message: string } }
+  | { type: 'level';        payload: LevelUpdate }
+  | { type: 'status';       payload: AllStreamStatus }
+  | { type: 'error';        payload: { streamId?: string; message: string } }
+  | { type: 'clientOnline'; payload: boolean }
+  | { type: 'devices';      payload: AudioDevice[] }
 
 export interface FormatInfo {
   id: StreamFormat
@@ -106,16 +109,24 @@ export const DEFAULT_ENCODER: EncoderConfig = {
 }
 
 export interface ServerEntry {
-  id: string
-  label: string
-  config: ServerConfig
+  id:            string
+  label:         string
+  config:        ServerConfig
+  deviceId:      string        // this stream's capture device
+  encoderConfig: EncoderConfig // this stream's encoder settings
 }
 
-export function makeServerEntry(label = 'Neuer Server'): ServerEntry {
+export function makeServerEntry(
+  label = 'Neuer Server',
+  deviceId = '',
+  encoderConfig: EncoderConfig = DEFAULT_ENCODER,
+): ServerEntry {
   return {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     label,
     config: { ...DEFAULT_SERVER },
+    deviceId,
+    encoderConfig: { ...encoderConfig },
   }
 }
 

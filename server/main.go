@@ -39,6 +39,45 @@ func main() {
 	relay := ingest.NewRelay()
 	srv := api.NewServer(store, hub, clientHub, relay, baseURL)
 
+	// When a new browser connects, push the current Windows-client state immediately
+	// so the browser doesn't have to wait for the next state-change event.
+	hub.SetOnNewClient(func(send func(api.MessageType, any)) {
+		connected := clientHub.IsConnected()
+		send(api.MsgClientOnline, connected)
+		if connected {
+			if devs := clientHub.Devices(); devs != nil {
+				send(api.MsgDevices, devs)
+			}
+		}
+		// Push current relay stream statuses so the browser is immediately in sync.
+		for _, u := range relay.AllActiveStats() {
+			send(api.MsgStatus, map[string]any{
+				"streamId":     u.StreamID,
+				"running":      u.Connected || u.Reconnecting,
+				"connected":    u.Connected,
+				"reconnecting": u.Reconnecting,
+				"bytesSent":    u.BytesSent,
+				"uptime":       u.Uptime.Nanoseconds(),
+				"listeners":    u.Listeners,
+				"bitrate":      u.Bitrate,
+			})
+		}
+	})
+
+	// Broadcast relay status updates (bytesSent, uptime, listeners, reconnect state) to all browsers.
+	relay.SetStatusCallback(func(u ingest.StatusUpdate) {
+		hub.Broadcast(api.MsgStatus, map[string]any{
+			"streamId":     u.StreamID,
+			"running":      u.Connected || u.Reconnecting,
+			"connected":    u.Connected,
+			"reconnecting": u.Reconnecting,
+			"bytesSent":    u.BytesSent,
+			"uptime":       u.Uptime.Nanoseconds(),
+			"listeners":    u.Listeners,
+			"bitrate":      u.Bitrate,
+		})
+	})
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -56,6 +95,7 @@ func main() {
 		r.Get("/formats", srv.HandleFormats)
 		r.Get("/config", srv.HandleConfigGet)
 		r.Put("/config", srv.HandleConfigPut)
+		r.Post("/stream/metadata", srv.HandleMetadata)
 		r.Post("/monitor/start", srv.HandleMonitorStart)
 		r.Post("/monitor/stop", srv.HandleMonitorStop)
 		r.Post("/asio/panel", srv.HandleAsioPanel)

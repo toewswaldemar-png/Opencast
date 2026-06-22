@@ -31,8 +31,15 @@ type WSMessage struct {
 
 // Hub manages browser WebSocket connections and broadcasts messages to them.
 type Hub struct {
-	mu      sync.RWMutex
-	clients map[*wsConn]struct{}
+	mu          sync.RWMutex
+	clients     map[*wsConn]struct{}
+	onNewClient func(send func(MessageType, any)) // optional: called for each new browser connection
+}
+
+// SetOnNewClient registers a callback that is invoked once per new browser WebSocket
+// connection, before the read/write pumps start. Use it to push initial state.
+func (h *Hub) SetOnNewClient(fn func(send func(MessageType, any))) {
+	h.onNewClient = fn
 }
 
 type wsConn struct {
@@ -56,6 +63,20 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
+
+	// Push current state to this connection before starting pumps.
+	if h.onNewClient != nil {
+		h.onNewClient(func(t MessageType, p any) {
+			data, err := json.Marshal(WSMessage{Type: t, Payload: p})
+			if err != nil {
+				return
+			}
+			select {
+			case c.send <- data:
+			default:
+			}
+		})
+	}
 
 	go c.writePump()
 	go c.readPump(func() {

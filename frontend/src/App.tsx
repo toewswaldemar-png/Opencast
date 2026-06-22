@@ -17,13 +17,16 @@ const EMPTY_LEVELS: LevelUpdate = { left: -120, right: -120 }
 
 export default function App() {
   const [servers, setServers]             = useState<ServerEntry[]>(() => [makeServerEntry('Hauptstream')])
+  // Global encoder + device are only used as defaults for the monitor and new cards.
   const [encoderConfig, setEncoderConfig] = useState<EncoderConfig>(DEFAULT_ENCODER)
   const [selectedDevice, setSelectedDevice] = useState('')
   const [allStatuses, setAllStatuses]     = useState<AllStreamStatus>({})
   const [levels, setLevels]               = useState<LevelUpdate>(EMPTY_LEVELS)
   const [loadingIds, setLoadingIds]       = useState<Set<string>>(new Set())
-  const [wsConnected, setWsConnected]     = useState(false)
-  const [autoReconnect, setAutoReconnect] = useState(true)
+  const [streamErrors, setStreamErrors]   = useState<Record<string, string>>({})
+  const [wsConnected, setWsConnected]         = useState(false)
+  const [clientConnected, setClientConnected] = useState(false)
+  const [autoReconnect, setAutoReconnect]     = useState(true)
   const [settingsOpen, setSettingsOpen]   = useState(false)
 
   const levelsDecayRef = useRef<number | null>(null)
@@ -31,20 +34,31 @@ export default function App() {
   const serversRef     = useRef(servers)
   serversRef.current   = servers
 
-  // Load config on start
+  // Load config on start — migrate old format (entries without deviceId/encoderConfig)
   useEffect(() => {
     configReady.current = false
     apiFetch('/api/config')
       .then((r) => r.json())
       .then((cfg) => {
         configReady.current = true
-        if (cfg.encoder)  setEncoderConfig((c) => ({ ...c, ...cfg.encoder }))
-        if (cfg.deviceId) setSelectedDevice(cfg.deviceId)
+        const globalEncoder: EncoderConfig = cfg.encoder
+          ? { ...DEFAULT_ENCODER, ...cfg.encoder }
+          : DEFAULT_ENCODER
+        const globalDevice: string = cfg.deviceId ?? ''
+
+        if (cfg.encoder)  setEncoderConfig(globalEncoder)
+        if (cfg.deviceId) setSelectedDevice(globalDevice)
         if (cfg.autoReconnect !== undefined) setAutoReconnect(cfg.autoReconnect)
+
         if (cfg.servers?.length) {
-          setServers(cfg.servers)
+          // Migrate entries that predate per-stream settings
+          setServers(cfg.servers.map((s: ServerEntry & Record<string, unknown>) => ({
+            ...s,
+            deviceId:      s.deviceId      || globalDevice,
+            encoderConfig: s.encoderConfig || globalEncoder,
+          })))
         } else if (cfg.server) {
-          const e = makeServerEntry('Hauptstream')
+          const e = makeServerEntry('Hauptstream', globalDevice, globalEncoder)
           e.config = { ...e.config, ...cfg.server }
           setServers([e])
         }
@@ -73,10 +87,20 @@ export default function App() {
   }, [servers, encoderConfig, selectedDevice, autoReconnect]) // eslint-disable-line
 
   // WebSocket
+  const selectedDeviceRef = useRef(selectedDevice)
+  selectedDeviceRef.current = selectedDevice
+
   const handleWSMessage = useCallback((msg: WSPayload) => {
     setWsConnected(true)
-    if (msg.type === 'status') {
-      // Server sends individual stream-status objects; merge into the map
+    if (msg.type === 'clientOnline') {
+      setClientConnected(msg.payload)
+    } else if (msg.type === 'devices') {
+      // Auto-select first active device into the global slot (monitor + new-card default)
+      if (!selectedDeviceRef.current && msg.payload.length > 0) {
+        const first = msg.payload.find((d) => d.state === 'active') ?? msg.payload[0]
+        if (first) setSelectedDevice(first.id)
+      }
+    } else if (msg.type === 'status') {
       const s = msg.payload as unknown as Record<string, unknown>
       const id = s['streamId'] as string | undefined
       if (id) {
@@ -90,13 +114,19 @@ export default function App() {
       setLevels(msg.payload)
       if (levelsDecayRef.current) clearTimeout(levelsDecayRef.current)
       levelsDecayRef.current = setTimeout(() => setLevels(EMPTY_LEVELS), 200) as unknown as number
+    } else if (msg.type === 'error') {
+      const { streamId, message } = msg.payload
+      if (streamId) {
+        setStreamErrors((prev) => ({ ...prev, [streamId]: message }))
+        setTimeout(() => setStreamErrors((prev) => { const n = { ...prev }; delete n[streamId]; return n }), 8000)
+      }
     }
   }, [])
   useWebSocket(handleWSMessage)
 
-  // Auto-monitor when idle
+  // Auto-monitor: fires when device, encoder, or client-connection state changes.
   useEffect(() => {
-    if (!selectedDevice) return
+    if (!selectedDevice || !clientConnected) return
     if (Object.keys(allStatuses).length > 0) return
     apiFetch('/api/monitor/start', {
       method: 'POST',
@@ -107,30 +137,45 @@ export default function App() {
         channels:   encoderConfig.channels,
       }),
     }).catch(() => {})
-  }, [selectedDevice, encoderConfig.sampleRate, encoderConfig.channels, Object.keys(allStatuses).join(',')]) // eslint-disable-line
+  }, [selectedDevice, encoderConfig.sampleRate, encoderConfig.channels, clientConnected, Object.keys(allStatuses).join(',')]) // eslint-disable-line
 
   // Stream controls
   const setLoading = (id: string, on: boolean) =>
     setLoadingIds((s) => { const n = new Set(s); on ? n.add(id) : n.delete(id); return n })
 
+  const showStreamError = (id: string, msg: string) => {
+    setStreamErrors((prev) => ({ ...prev, [id]: msg }))
+    setTimeout(() => setStreamErrors((prev) => { const n = { ...prev }; delete n[id]; return n }), 8000)
+  }
+
   const handleStart = async (serverId: string) => {
+    setStreamErrors((prev) => { const n = { ...prev }; delete n[serverId]; return n })
     const entry = serversRef.current.find((s) => s.id === serverId)
     if (!entry) return
     setLoading(serverId, true)
+    // Use entry's own device/encoder; fall back to global defaults
+    const deviceId = entry.deviceId || selectedDevice
+    const enc      = entry.encoderConfig
     try {
-      await apiFetch('/api/stream/start', {
+      const res = await apiFetch('/api/stream/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           streamId:   serverId,
-          deviceId:   selectedDevice,
-          sampleRate: encoderConfig.sampleRate,
-          channels:   encoderConfig.channels,
-          format:     encoderConfig.format,
-          bitrate:    encoderConfig.bitrate,
+          deviceId,
+          sampleRate: enc.sampleRate,
+          channels:   enc.channels,
+          format:     enc.format,
+          bitrate:    enc.bitrate,
           server:     entry.config,
         }),
       })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showStreamError(serverId, data.error ?? `Fehler ${res.status}`)
+      }
+    } catch (err) {
+      showStreamError(serverId, err instanceof Error ? err.message : 'Netzwerkfehler')
     } finally { setLoading(serverId, false) }
   }
 
@@ -150,9 +195,14 @@ export default function App() {
     setServers((ss) => ss.map((s) => s.id === id ? { ...s, ...patch } : s))
   const updateServerConfig = (id: string, patch: Partial<ServerConfig>) =>
     setServers((ss) => ss.map((s) => s.id === id ? { ...s, config: { ...s.config, ...patch } } : s))
+  const updateServerEncoder = (id: string, patch: Partial<EncoderConfig>) =>
+    setServers((ss) => ss.map((s) => s.id === id
+      ? { ...s, encoderConfig: { ...s.encoderConfig, ...patch } }
+      : s))
 
   const addServer = () => {
-    const e = makeServerEntry(`Stream ${servers.length + 1}`)
+    // New card inherits the current global device and encoder as its defaults
+    const e = makeServerEntry(`Stream ${servers.length + 1}`, selectedDevice, encoderConfig)
     setServers((ss) => [...ss, e])
   }
 
@@ -185,16 +235,17 @@ export default function App() {
             entry={entry}
             status={allStatuses[entry.id] ?? null}
             levels={levels}
-            encoderConfig={encoderConfig}
-            selectedDevice={selectedDevice}
+            encoderConfig={entry.encoderConfig}
+            selectedDevice={entry.deviceId || selectedDevice}
             anyRunning={Object.keys(allStatuses).length > 0}
             isLoading={loadingIds.has(entry.id)}
+            error={streamErrors[entry.id] ?? null}
             onStart={() => handleStart(entry.id)}
             onStop={() => handleStop(entry.id)}
             onChange={(p) => updateServerConfig(entry.id, p)}
             onLabelChange={(l) => updateServer(entry.id, { label: l })}
-            onDeviceChange={setSelectedDevice}
-            onEncoderChange={(p) => setEncoderConfig((c) => ({ ...c, ...p }))}
+            onDeviceChange={(id) => updateServer(entry.id, { deviceId: id })}
+            onEncoderChange={(p) => updateServerEncoder(entry.id, p)}
             onRemove={!allStatuses[entry.id] ? () => removeServer(entry.id) : undefined}
           />
         ))}

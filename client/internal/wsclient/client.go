@@ -117,9 +117,10 @@ func (c *Client) connect(ctx context.Context) error {
 	}()
 
 	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-	conn.SetPongHandler(func(string) error {
+	// Server sends pings every 30s; reset our read deadline on each ping so we don't time out.
+	conn.SetPingHandler(func(msg string) error {
 		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
-		return nil
+		return conn.WriteControl(websocket.PongMessage, []byte(msg), time.Now().Add(5*time.Second))
 	})
 
 	for {
@@ -172,6 +173,8 @@ func (c *Client) handleCmd(cmd Cmd) {
 }
 
 // Send sends a message to the server.
+// The mutex is held for the entire write because gorilla/websocket does not
+// allow concurrent WriteMessage calls.
 func (c *Client) Send(msgType string, payload any) {
 	data, err := json.Marshal(map[string]any{"type": msgType, "payload": payload})
 	if err != nil {
@@ -179,12 +182,11 @@ func (c *Client) Send(msgType string, payload any) {
 	}
 	c.mu.Lock()
 	conn := c.conn
-	c.mu.Unlock()
-	if conn == nil {
-		return
+	if conn != nil {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		conn.WriteMessage(websocket.TextMessage, data)
 	}
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	conn.WriteMessage(websocket.TextMessage, data)
+	c.mu.Unlock()
 }
 
 func (c *Client) sendDevices() {
@@ -257,12 +259,19 @@ func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader
 		<-done
 		return fmt.Errorf("ingest PUT: %w", err)
 	}
+	log.Printf("[ingest] PUT %s → HTTP %d", ingestURL, resp.StatusCode)
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		pr.CloseWithError(fmt.Errorf("server returned %d", resp.StatusCode))
+		body, _ := io.ReadAll(resp.Body)
+		var je struct{ Error string `json:"error"` }
+		errMsg := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if json.Unmarshal(body, &je) == nil && je.Error != "" {
+			errMsg = je.Error
+		}
+		pr.CloseWithError(fmt.Errorf("%s", errMsg))
 		<-done
-		return fmt.Errorf("ingest server returned %d", resp.StatusCode)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	// Block until the stream ends: src exhausted (encoder closed), context

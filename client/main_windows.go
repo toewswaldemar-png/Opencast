@@ -80,7 +80,17 @@ func onReady() {
 
 	ws = wsclient.New(cfg.ServerURL, wsclient.Handlers{
 		OnStart: func(p wsclient.CmdStartPayload) {
-			go handleStart(p)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[stream/%s] PANIC in handleStart: %v", p.StreamID, r)
+						if ws != nil {
+							ws.SendError(p.StreamID, fmt.Sprintf("client panic: %v", r))
+						}
+					}
+				}()
+				handleStart(p)
+			}()
 		},
 		OnStop: func(p wsclient.CmdStopPayload) {
 			go manager.Stop(p.StreamID)
@@ -118,6 +128,11 @@ func onReady() {
 	manager.SetStatusCallback(func(streamID string, running, connected bool, bytesSent int64, uptime time.Duration) {
 		if ws != nil {
 			ws.SendStatus(streamID, running, connected, bytesSent, uptime)
+		}
+	})
+	manager.SetErrorCallback(func(streamID, errMsg string) {
+		if ws != nil {
+			ws.SendError(streamID, errMsg)
 		}
 	})
 
@@ -187,11 +202,14 @@ func onExit() {
 }
 
 func handleStart(p wsclient.CmdStartPayload) {
-	// ASIO allows only one active driver instance at a time.
-	// Stop the monitor first so it releases g_asio before we open it for streaming.
-	if strings.HasPrefix(p.DeviceID, "asio:") {
-		monitor.Stop()
-	}
+	log.Printf("[stream/%s] cmd:start empfangen — device=%s format=%s br=%d sr=%d ch=%d",
+		p.StreamID, p.DeviceID, p.Format, p.Bitrate, p.SampleRate, p.Channels)
+
+	// Stop the monitor before streaming: ASIO allows only one driver instance,
+	// and concurrent WASAPI clients on the same device cause intermittent dropouts.
+	log.Printf("[stream/%s] Monitor wird gestoppt", p.StreamID)
+	monitor.Stop()
+	log.Printf("[stream/%s] Monitor gestoppt", p.StreamID)
 
 	format := audio.Format(p.Format)
 	ingestURL := p.IngestURL

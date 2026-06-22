@@ -20,6 +20,7 @@ const DEFAULT_STATUS: StreamStatus = {
   uptime: 0,
   bytesSent: 0,
   bitrate: 0,
+  listeners: 0,
   format: 'mp3',
 }
 

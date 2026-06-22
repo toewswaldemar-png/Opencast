@@ -2,22 +2,67 @@
 
 package audio
 
+/*
+#cgo CXXFLAGS: -I../../../ASIOSDK/common
+#cgo LDFLAGS: -lole32 -loleaut32 -ladvapi32 -lstdc++
+#include "asio_host.h"
+#include <stdlib.h>
+*/
+import "C"
+
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
-
-	"github.com/go-ole/go-ole"
-	"github.com/moutend/go-wca/pkg/wca"
 )
 
-// NewCapturer dispatches to ASIOCapturer for "asio:" devices and WasapiCapturer
-// for everything else (including "loopback:" virtual devices).
+var (
+	globalASIOCapturerMu sync.Mutex
+	globalASIOCapturer   *ASIOCapturer
+
+	// asioGlobalMu serializes all ASIO driver opens — only one at a time.
+	// asio_open_driver writes the global g_asio; a concurrent second open
+	// would free the first's driver while it is still in asio_run_message_pump.
+	asioGlobalMu sync.Mutex
+)
+
+//export goAsioBufferCallback
+func goAsioBufferCallback(data unsafe.Pointer, numFrames C.int, _ C.int, numChannels C.int) {
+	globalASIOCapturerMu.Lock()
+	capturer := globalASIOCapturer
+	globalASIOCapturerMu.Unlock()
+	if capturer == nil {
+		return
+	}
+	capturer.callbackFired.Store(true)
+	capturer.callbackOnce.Do(func() {
+		log.Printf("[asio] Erster Callback: frames=%d ch=%d", int(numFrames), int(numChannels))
+	})
+	byteCount := int(numFrames) * int(numChannels) * 2
+	buf := make([]byte, byteCount)
+	copy(buf, unsafe.Slice((*byte)(data), byteCount))
+	capturer.sendPCM(buf)
+}
+
+type ASIOCapturer struct {
+	cfg            CaptureConfig
+	actualChannels int
+	pcmOut         chan []byte
+	levels         chan LevelUpdate
+	stopCh         chan struct{}
+	doneCh         chan struct{}
+	callbackOnce   sync.Once
+	callbackFired  atomic.Bool
+}
+
+// NewCapturer dispatches to ASIOCapturer for "asio:" devices, WasapiCapturer otherwise.
 func NewCapturer(cfg CaptureConfig) Capturer {
 	if strings.HasPrefix(cfg.DeviceID, "asio:") {
 		return &ASIOCapturer{
@@ -37,312 +82,146 @@ func NewCapturer(cfg CaptureConfig) Capturer {
 	}
 }
 
-// ── WASAPI loopback flag ──────────────────────────────────────────────────────
+func (c *ASIOCapturer) OutputCh() <-chan []byte     { return c.pcmOut }
+func (c *ASIOCapturer) LevelCh() <-chan LevelUpdate { return c.levels }
 
-const wasapiLoopbackFlag = uint32(0x00020000) // AUDCLNT_STREAMFLAGS_LOOPBACK
-
-// ── Format detection ─────────────────────────────────────────────────────────
-
-const (
-	waveFormatPCM2       = uint16(1)
-	waveFormatIEEEFloat  = uint16(3)
-	waveFormatExtensible = uint16(0xFFFE)
-)
-
-var ksdataformatSubtypeIEEEFloat = [16]byte{
-	0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00,
-	0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
-}
-
-func wasapiIsFloat(f *wca.WAVEFORMATEX) bool {
-	if f.WFormatTag == waveFormatIEEEFloat {
-		return true
+func (c *ASIOCapturer) ActualConfig() CaptureConfig {
+	ch := uint16(c.actualChannels)
+	if ch == 0 {
+		ch = c.cfg.Channels
 	}
-	if f.WFormatTag == waveFormatExtensible {
-		subFmt := (*[16]byte)(unsafe.Pointer(uintptr(unsafe.Pointer(f)) + 24))
-		return *subFmt == ksdataformatSubtypeIEEEFloat
+	return CaptureConfig{
+		DeviceID:   c.cfg.DeviceID,
+		SampleRate: c.cfg.SampleRate,
+		Channels:   ch,
+		BitDepth:   16,
 	}
-	return false
 }
 
-// ── WasapiCapturer ───────────────────────────────────────────────────────────
-
-type WasapiCapturer struct {
-	cfg     CaptureConfig
-	actual  CaptureConfig
-	isFloat bool
-	srcBPS  uint32
-
-	pcmOut chan []byte
-	levels chan LevelUpdate
-	stopCh chan struct{}
-	doneCh chan struct{}
-}
-
-func (c *WasapiCapturer) OutputCh() <-chan []byte     { return c.pcmOut }
-func (c *WasapiCapturer) LevelCh() <-chan LevelUpdate { return c.levels }
-func (c *WasapiCapturer) ActualConfig() CaptureConfig { return c.actual }
-
-func (c *WasapiCapturer) isLoopback() bool {
-	return strings.HasPrefix(c.cfg.DeviceID, "loopback:")
-}
-
-func (c *WasapiCapturer) Start(ctx context.Context) error {
+func (c *ASIOCapturer) Start(ctx context.Context) error {
+	clsidStr := strings.TrimPrefix(c.cfg.DeviceID, "asio:")
 	errCh := make(chan error, 1)
+
 	go func() {
+		asioGlobalMu.Lock()
 		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		defer close(c.doneCh)
-
-		if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-			if oleErr, ok := err.(*ole.OleError); ok {
-				code := oleErr.Code()
-				if code != 0x00000001 && code != 0x80010106 {
-					errCh <- fmt.Errorf("CoInitializeEx: %w", err)
-					return
-				}
-			}
-		} else {
-			defer ole.CoUninitialize()
-		}
-
-		de, ac, cc, err := c.initCapture()
-		if err != nil {
-			errCh <- err
-			return
-		}
 		defer func() {
-			ac.Stop()
-			cc.Release()
-			ac.Release()
-			de.Release()
+			C.asio_release_driver()
+			asioGlobalMu.Unlock()
+			close(c.doneCh)
+			runtime.UnlockOSThread()
 		}()
 
+		cClsid := C.CString(clsidStr)
+		defer C.free(unsafe.Pointer(cClsid))
+
+		var errBuf [256]C.char
+
+		if C.asio_open_driver(cClsid, &errBuf[0], 256) != 0 {
+			errCh <- fmt.Errorf("ASIO-Treiber konnte nicht geöffnet werden: %s", C.GoString(&errBuf[0]))
+			return
+		}
+
+		var numInputCh C.long
+		var defSR C.double
+		if C.asio_get_driver_info(&numInputCh, &defSR, &errBuf[0], 256) != 0 {
+			errCh <- fmt.Errorf("ASIO-Treiberinfo: %s", C.GoString(&errBuf[0]))
+			return
+		}
+
+		numCh := int(c.cfg.Channels)
+		if numCh > int(numInputCh) {
+			numCh = int(numInputCh)
+		}
+		if numCh < 1 {
+			errCh <- fmt.Errorf("ASIO-Treiber hat keine Eingangskanäle")
+			return
+		}
+		c.actualChannels = numCh
+
+		prefBuf := C.asio_get_preferred_buffer_size()
+		channels := make([]C.int, numCh)
+		for i := range channels {
+			channels[i] = C.int(i)
+		}
+
+		globalASIOCapturerMu.Lock()
+		globalASIOCapturer = c
+		globalASIOCapturerMu.Unlock()
+
+		sr := C.double(c.cfg.SampleRate)
+		if C.asio_start_capture(&channels[0], C.int(numCh), prefBuf, sr, &errBuf[0], 256) != 0 {
+			globalASIOCapturerMu.Lock()
+			globalASIOCapturer = nil
+			globalASIOCapturerMu.Unlock()
+			errCh <- fmt.Errorf("ASIO-Aufnahme konnte nicht gestartet werden: %s", C.GoString(&errBuf[0]))
+			return
+		}
+
+		log.Printf("[asio] Capture gestartet: ch=%d bufSz=%d sr=%.0f", numCh, int(prefBuf), float64(sr))
 		close(errCh)
-		c.captureLoop(ctx, ac, cc)
+
+		go func() {
+			select {
+			case <-ctx.Done():
+			case <-c.stopCh:
+			}
+			C.asio_stop()
+		}()
+
+		// Watchdog: warn if no callbacks arrive within 5 s.
+		// Typical cause: ASIO driver is not the primary host (e.g. ReaRoute ASIO
+		// while REAPER uses a hardware device) — use WASAPI loopback instead.
+		go func() {
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-c.doneCh:
+			case <-timer.C:
+				if !c.callbackFired.Load() {
+					log.Printf("[asio] WARNUNG: Keine Audio-Callbacks nach 5s. "+
+						"Prüfe ob der ASIO-Treiber aktiv ist. "+
+						"Für ReaRoute: WASAPI-Loopback statt ASIO verwenden.")
+				}
+			}
+		}()
+
+		C.asio_run_message_pump()
+
+		globalASIOCapturerMu.Lock()
+		globalASIOCapturer = nil
+		globalASIOCapturerMu.Unlock()
 	}()
+
 	return <-errCh
 }
 
-func (c *WasapiCapturer) initCapture() (*wca.IMMDeviceEnumerator, *wca.IAudioClient, *wca.IAudioCaptureClient, error) {
-	var de *wca.IMMDeviceEnumerator
-	if err := wca.CoCreateInstance(wca.CLSID_MMDeviceEnumerator, 0, wca.CLSCTX_ALL, wca.IID_IMMDeviceEnumerator, &de); err != nil {
-		return nil, nil, nil, fmt.Errorf("create device enumerator: %w", err)
+func (c *ASIOCapturer) Stop() {
+	select {
+	case <-c.stopCh:
+	default:
+		close(c.stopCh)
 	}
-
-	device, err := c.findDevice(de)
-	if err != nil {
-		de.Release()
-		return nil, nil, nil, err
-	}
-	defer device.Release()
-
-	var ac *wca.IAudioClient
-	if err := device.Activate(wca.IID_IAudioClient, wca.CLSCTX_ALL, nil, &ac); err != nil {
-		de.Release()
-		return nil, nil, nil, fmt.Errorf("activate audio client: %w", err)
-	}
-
-	var mixFmt *wca.WAVEFORMATEX
-	if err := ac.GetMixFormat(&mixFmt); err != nil {
-		ac.Release()
-		de.Release()
-		return nil, nil, nil, fmt.Errorf("get mix format: %w", err)
-	}
-	defer ole.CoTaskMemFree(uintptr(unsafe.Pointer(mixFmt)))
-
-	c.isFloat = wasapiIsFloat(mixFmt)
-	c.srcBPS = uint32(mixFmt.WBitsPerSample) / 8
-	c.actual = CaptureConfig{
-		DeviceID:   c.cfg.DeviceID,
-		SampleRate: mixFmt.NSamplesPerSec,
-		Channels:   mixFmt.NChannels,
-		BitDepth:   16,
-	}
-
-	var streamFlags uint32
-	if c.isLoopback() {
-		streamFlags = wasapiLoopbackFlag
-	}
-	const bufDuration = wca.REFERENCE_TIME(200 * 10000)
-	if err := ac.Initialize(wca.AUDCLNT_SHAREMODE_SHARED, streamFlags, bufDuration, 0, mixFmt, nil); err != nil {
-		ac.Release()
-		de.Release()
-		return nil, nil, nil, fmt.Errorf("initialize audio client: %w", err)
-	}
-
-	var cc *wca.IAudioCaptureClient
-	if err := ac.GetService(wca.IID_IAudioCaptureClient, &cc); err != nil {
-		ac.Release()
-		de.Release()
-		return nil, nil, nil, fmt.Errorf("get capture client: %w", err)
-	}
-
-	if err := ac.Start(); err != nil {
-		cc.Release()
-		ac.Release()
-		de.Release()
-		return nil, nil, nil, fmt.Errorf("start audio client: %w", err)
-	}
-	return de, ac, cc, nil
+	<-c.doneCh
 }
 
-func (c *WasapiCapturer) findDevice(de *wca.IMMDeviceEnumerator) (*wca.IMMDevice, error) {
-	if c.cfg.DeviceID == "" || c.cfg.DeviceID == "default" {
-		var d *wca.IMMDevice
-		if err := de.GetDefaultAudioEndpoint(wca.ECapture, wca.ECommunications, &d); err != nil {
-			return nil, fmt.Errorf("get default capture device: %w", err)
-		}
-		return d, nil
-	}
-
-	if c.isLoopback() {
-		targetID := strings.TrimPrefix(c.cfg.DeviceID, "loopback:")
-		var dc *wca.IMMDeviceCollection
-		if err := de.EnumAudioEndpoints(wca.ERender, wca.DEVICE_STATEMASK_ALL, &dc); err != nil {
-			return nil, fmt.Errorf("EnumAudioEndpoints render: %w", err)
-		}
-		defer dc.Release()
-		var count uint32
-		dc.GetCount(&count)
-		for i := uint32(0); i < count; i++ {
-			var d *wca.IMMDevice
-			if err := dc.Item(i, &d); err != nil {
-				continue
-			}
-			var id string
-			d.GetId(&id)
-			if id == targetID {
-				return d, nil
-			}
-			d.Release()
-		}
-		return nil, fmt.Errorf("loopback device %q not found", targetID)
-	}
-
-	var dc *wca.IMMDeviceCollection
-	if err := de.EnumAudioEndpoints(wca.ECapture, wca.DEVICE_STATEMASK_ALL, &dc); err != nil {
-		return nil, fmt.Errorf("EnumAudioEndpoints: %w", err)
-	}
-	defer dc.Release()
-
-	var count uint32
-	dc.GetCount(&count)
-	for i := uint32(0); i < count; i++ {
-		var d *wca.IMMDevice
-		if err := dc.Item(i, &d); err != nil {
-			continue
-		}
-		var id string
-		d.GetId(&id)
-		if id == c.cfg.DeviceID {
-			return d, nil
-		}
-		d.Release()
-	}
-	return nil, fmt.Errorf("device %q not found", c.cfg.DeviceID)
-}
-
-func (c *WasapiCapturer) captureLoop(ctx context.Context, ac *wca.IAudioClient, cc *wca.IAudioCaptureClient) {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.stopCh:
-			return
-		case <-ticker.C:
-			c.readAvailablePackets(cc)
-		}
+func (c *ASIOCapturer) sendPCM(buf []byte) {
+	c.sendLevels(buf)
+	select {
+	case c.pcmOut <- buf:
+	default:
 	}
 }
 
-func (c *WasapiCapturer) readAvailablePackets(cc *wca.IAudioCaptureClient) {
-	for {
-		var data *byte
-		var numFrames, flags uint32
-		if err := cc.GetBuffer(&data, &numFrames, &flags, nil, nil); err != nil {
-			break
-		}
-		if numFrames == 0 {
-			cc.ReleaseBuffer(0)
-			break
-		}
-
-		byteCount := numFrames * uint32(c.actual.Channels) * c.srcBPS
-		raw := make([]byte, byteCount)
-		if flags&wca.AUDCLNT_BUFFERFLAGS_SILENT == 0 {
-			copy(raw, unsafe.Slice(data, byteCount))
-		}
-		cc.ReleaseBuffer(numFrames)
-
-		var pcm []byte
-		switch {
-		case c.isFloat:
-			pcm = wasapiF32ToI16(raw)
-		case c.srcBPS == 2:
-			pcm = raw
-		default:
-			pcm = wasapiIntToI16(raw, c.srcBPS, c.actual.Channels)
-		}
-
-		c.sendLevels(pcm)
-		select {
-		case c.pcmOut <- pcm:
-		default:
-		}
-	}
-}
-
-func wasapiF32ToI16(src []byte) []byte {
-	n := len(src) / 4
-	out := make([]byte, n*2)
-	for i := range n {
-		bits := binary.LittleEndian.Uint32(src[i*4:])
-		f := math.Float32frombits(bits)
-		if f > 1 {
-			f = 1
-		} else if f < -1 {
-			f = -1
-		}
-		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(f*32767)))
-	}
-	return out
-}
-
-// wasapiIntToI16 converts interleaved 24- or 32-bit integer LE PCM to 16-bit LE.
-func wasapiIntToI16(src []byte, srcBPS uint32, channels uint16) []byte {
-	n := int(srcBPS)
-	if n == 0 || len(src) == 0 {
-		return nil
-	}
-	samples := len(src) / n
-	out := make([]byte, samples*2)
-	for i := range samples {
-		off := i * n
-		var v int32
-		switch n {
-		case 3:
-			v = int32(src[off]) | int32(src[off+1])<<8 | int32(int8(src[off+2]))<<16
-			v <<= 8
-		case 4:
-			v = int32(binary.LittleEndian.Uint32(src[off:]))
-		default:
-			v = int32(int16(binary.LittleEndian.Uint16(src[off:]))) << 16
-		}
-		binary.LittleEndian.PutUint16(out[i*2:], uint16(int16(v>>16)))
-	}
-	_ = channels
-	return out
-}
-
-func (c *WasapiCapturer) sendLevels(pcm []byte) {
+func (c *ASIOCapturer) sendLevels(pcm []byte) {
 	if len(pcm) < 2 {
 		return
 	}
+	ch := c.actualChannels
+	if ch < 1 {
+		ch = 1
+	}
 	var peakL, peakR float64
-	ch := int(c.actual.Channels)
 	for i := 0; i+1 < len(pcm); i += 2 * ch {
 		sL := math.Abs(float64(int16(uint16(pcm[i])|uint16(pcm[i+1])<<8)) / 32768.0)
 		if sL > peakL {
@@ -369,11 +248,63 @@ func (c *WasapiCapturer) sendLevels(pcm []byte) {
 	}
 }
 
-func (c *WasapiCapturer) Stop() {
-	select {
-	case <-c.stopCh:
-	default:
-		close(c.stopCh)
+// OpenASIOControlPanel opens the driver's settings panel in a background thread.
+func OpenASIOControlPanel(clsid string) {
+	cClsid := C.CString(clsid)
+	defer C.free(unsafe.Pointer(cClsid))
+	C.asio_open_control_panel(cClsid)
+}
+
+func asioEnumerateDrivers() []Device {
+	const maxDrv = 32
+	var info [maxDrv]C.ASIORegEntry
+	count := int(C.asio_enumerate_drivers(&info[0], C.int(maxDrv)))
+
+	devices := make([]Device, 0, count)
+	for i := 0; i < count; i++ {
+		name := C.GoString(&info[i].name[0])
+		clsid := C.GoString(&info[i].clsid[0])
+		if name == "" || clsid == "" {
+			continue
+		}
+		// No COM probe here — opening an ASIO driver without a locked OS thread
+		// can crash the process. Use conservative defaults; actual values are
+		// determined when capture starts on the dedicated STA goroutine.
+		devices = append(devices, Device{
+			ID:                "asio:" + clsid,
+			Name:              name + " (ASIO)",
+			API:               APIAsio,
+			State:             StateActive,
+			MaxInputChannels:  2,
+			DefaultSampleRate: 48000,
+		})
 	}
-	<-c.doneCh
+	return devices
+}
+
+func asioProbeDriver(clsid string) (channels int, sampleRate float64) {
+	// Non-blocking: if a stream is active (holds asioGlobalMu), return defaults
+	// immediately instead of stalling the WS reconnect goroutine.
+	if !asioGlobalMu.TryLock() {
+		return 2, 48000
+	}
+	defer asioGlobalMu.Unlock()
+
+	cClsid := C.CString(clsid)
+	defer C.free(unsafe.Pointer(cClsid))
+
+	var numCh C.long
+	var sr C.double
+	if C.asio_probe_driver(cClsid, &numCh, &sr) != 0 {
+		return 2, 48000
+	}
+	ch := int(numCh)
+	if ch < 1 {
+		ch = 2
+	}
+	rate := float64(sr)
+	if rate <= 0 {
+		rate = 48000
+	}
+	return ch, rate
 }
