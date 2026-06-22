@@ -1,13 +1,12 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 
-import AppHeader            from './components/AppHeader'
-import StreamCard            from './components/StreamCard'
-import StatusBar             from './components/StatusBar'
-import TokenGate             from './components/TokenGate'
-import GlobalSettingsDialog  from './components/GlobalSettingsDialog'
+import AppHeader           from './components/AppHeader'
+import StreamCard          from './components/StreamCard'
+import StatusBar           from './components/StatusBar'
+import GlobalSettingsDialog from './components/GlobalSettingsDialog'
 
-import { useWebSocket }             from './hooks/useWebSocket'
-import { apiFetch, onUnauthorized } from './lib/api'
+import { useWebSocket } from './hooks/useWebSocket'
+import { apiFetch }     from './lib/api'
 import {
   ServerEntry, ServerConfig, EncoderConfig,
   AllStreamStatus, LevelUpdate, WSPayload,
@@ -17,44 +16,23 @@ import {
 const EMPTY_LEVELS: LevelUpdate = { left: -120, right: -120 }
 
 export default function App() {
-  const [token, setTokenState] = useState(() => {
-    const params  = new URLSearchParams(window.location.search)
-    const fromUrl = params.get('auth')
-    if (fromUrl) {
-      localStorage.setItem('opencast_token', fromUrl)
-      history.replaceState(null, '', window.location.pathname)
-      return fromUrl
-    }
-    return localStorage.getItem('opencast_token') ?? ''
-  })
-
-  const [servers, setServers]               = useState<ServerEntry[]>(() => [makeServerEntry('Hauptstream')])
-  const [encoderConfig, setEncoderConfig]   = useState<EncoderConfig>(DEFAULT_ENCODER)
+  const [servers, setServers]             = useState<ServerEntry[]>(() => [makeServerEntry('Hauptstream')])
+  const [encoderConfig, setEncoderConfig] = useState<EncoderConfig>(DEFAULT_ENCODER)
   const [selectedDevice, setSelectedDevice] = useState('')
-  const [allStatuses, setAllStatuses]       = useState<AllStreamStatus>({})
-  const [levels, setLevels]                 = useState<LevelUpdate>(EMPTY_LEVELS)
-  const [loadingIds, setLoadingIds]         = useState<Set<string>>(new Set())
-  const [wsConnected, setWsConnected]       = useState(false)
-  const [autoReconnect, setAutoReconnect]   = useState(true)
-  const [settingsOpen, setSettingsOpen]     = useState(false)
+  const [allStatuses, setAllStatuses]     = useState<AllStreamStatus>({})
+  const [levels, setLevels]               = useState<LevelUpdate>(EMPTY_LEVELS)
+  const [loadingIds, setLoadingIds]       = useState<Set<string>>(new Set())
+  const [wsConnected, setWsConnected]     = useState(false)
+  const [autoReconnect, setAutoReconnect] = useState(true)
+  const [settingsOpen, setSettingsOpen]   = useState(false)
 
   const levelsDecayRef = useRef<number | null>(null)
   const configReady    = useRef(false)
   const serversRef     = useRef(servers)
   serversRef.current   = servers
 
-  const handleToken = useCallback((tok: string) => {
-    localStorage.setItem('opencast_token', tok)
-    setTokenState(tok)
-  }, [])
-
-  useEffect(() => {
-    onUnauthorized(() => { setTokenState(''); localStorage.removeItem('opencast_token') })
-  }, [])
-
   // Load config on start
   useEffect(() => {
-    if (!token) return
     configReady.current = false
     apiFetch('/api/config')
       .then((r) => r.json())
@@ -72,10 +50,10 @@ export default function App() {
         }
       })
       .catch(() => { configReady.current = true })
-  }, [token]) // eslint-disable-line
+  }, [])
 
   const saveConfig = useCallback(() => {
-    if (!token || !configReady.current) return
+    if (!configReady.current) return
     apiFetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -86,30 +64,39 @@ export default function App() {
         autoReconnect,
       }),
     }).catch(() => {})
-  }, [token, encoderConfig, selectedDevice, autoReconnect])
+  }, [encoderConfig, selectedDevice, autoReconnect])
 
   useEffect(() => {
-    if (!token || !configReady.current) return
+    if (!configReady.current) return
     const t = setTimeout(saveConfig, 500)
     return () => clearTimeout(t)
-  }, [servers, encoderConfig, selectedDevice, autoReconnect, token]) // eslint-disable-line
+  }, [servers, encoderConfig, selectedDevice, autoReconnect]) // eslint-disable-line
 
   // WebSocket
   const handleWSMessage = useCallback((msg: WSPayload) => {
     setWsConnected(true)
     if (msg.type === 'status') {
-      setAllStatuses(msg.payload)
+      // Server sends individual stream-status objects; merge into the map
+      const s = msg.payload as unknown as Record<string, unknown>
+      const id = s['streamId'] as string | undefined
+      if (id) {
+        if (s['running']) {
+          setAllStatuses(prev => ({ ...prev, [id]: s as unknown as import('./types').StreamStatus }))
+        } else {
+          setAllStatuses(prev => { const n = { ...prev }; delete n[id]; return n })
+        }
+      }
     } else if (msg.type === 'level') {
       setLevels(msg.payload)
       if (levelsDecayRef.current) clearTimeout(levelsDecayRef.current)
       levelsDecayRef.current = setTimeout(() => setLevels(EMPTY_LEVELS), 200) as unknown as number
     }
   }, [])
-  useWebSocket(handleWSMessage, token)
+  useWebSocket(handleWSMessage)
 
   // Auto-monitor when idle
   useEffect(() => {
-    if (!token || !selectedDevice) return
+    if (!selectedDevice) return
     if (Object.keys(allStatuses).length > 0) return
     apiFetch('/api/monitor/start', {
       method: 'POST',
@@ -120,7 +107,7 @@ export default function App() {
         channels:   encoderConfig.channels,
       }),
     }).catch(() => {})
-  }, [selectedDevice, encoderConfig.sampleRate, encoderConfig.channels, token, Object.keys(allStatuses).join(',')]) // eslint-disable-line
+  }, [selectedDevice, encoderConfig.sampleRate, encoderConfig.channels, Object.keys(allStatuses).join(',')]) // eslint-disable-line
 
   // Stream controls
   const setLoading = (id: string, on: boolean) =>
@@ -173,10 +160,6 @@ export default function App() {
     if (allStatuses[id]) return
     setServers((ss) => ss.filter((s) => s.id !== id))
   }
-
-  // ── Render ──────────────────────────────────────────────────────────
-
-  if (!token) return <TokenGate onToken={handleToken} />
 
   const liveCount = Object.values(allStatuses).filter((s) => s.connected).length
 

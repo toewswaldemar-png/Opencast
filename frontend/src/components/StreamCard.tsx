@@ -440,7 +440,7 @@ export default function StreamCard({
 
   const isLive         = !!(status?.running && status?.connected)
   const isReconnecting = !!(status?.running && !status?.connected)
-  const displayLevels  = isLive ? levels : { left: DB_MIN, right: DB_MIN }
+  const displayLevels  = levels
 
   return (
     <div className={cn(

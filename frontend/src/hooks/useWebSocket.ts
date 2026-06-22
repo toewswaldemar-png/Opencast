@@ -4,13 +4,12 @@ import { wsUrl } from '../lib/api'
 
 type MessageHandler = (msg: WSPayload) => void
 
-export function useWebSocket(onMessage: MessageHandler, token: string) {
+export function useWebSocket(onMessage: MessageHandler) {
   const wsRef = useRef<WebSocket | null>(null)
   const handlerRef = useRef(onMessage)
   handlerRef.current = onMessage
 
   const connect = useCallback(() => {
-    if (!token) return
     const ws = new WebSocket(wsUrl('/ws'))
     wsRef.current = ws
 
@@ -25,7 +24,6 @@ export function useWebSocket(onMessage: MessageHandler, token: string) {
 
     ws.onclose = () => {
       wsRef.current = null
-      // Reconnect after 2s if not intentionally closed
       setTimeout(() => {
         if (wsRef.current === null) connect()
       }, 2000)
@@ -45,5 +43,5 @@ export function useWebSocket(onMessage: MessageHandler, token: string) {
         ws.close()
       }
     }
-  }, [connect, token])
+  }, [connect])
 }
