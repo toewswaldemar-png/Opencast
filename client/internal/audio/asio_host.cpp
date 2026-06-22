@@ -220,19 +220,25 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
     if (!g_asio) { snprintf(errBuf, errLen, "kein Treiber geoeffnet"); return -1; }
     if (numChannels > MAX_ASIO_CHANNELS / 2) numChannels = MAX_ASIO_CHANNELS / 2;
 
-    // Some virtual ASIO drivers (e.g. ReaRoute) require an explicit setSampleRate
-    // call before they will deliver bufferSwitch callbacks, even when the rate
-    // is already correct. Always call setSampleRate: with the requested rate if
-    // supported, otherwise with the driver's current rate (which REAPER owns).
+    // Handle sample rate: only call setSampleRate when the rate actually needs
+    // to change.  Calling it with the current rate (even the same value) on USB
+    // hardware interfaces (e.g. UR22mkII) triggers a full clock re-sync over USB
+    // which takes 10-20 s.  For virtual drivers that require the call to unblock
+    // callbacks (e.g. ReaRoute, canSampleRate != ASE_OK path), we still call it.
     ASIOSampleRate actualSR = 48000.0;
     g_asio->getSampleRate(&actualSR);
     {
         ASIOError canErr = g_asio->canSampleRate((ASIOSampleRate)sampleRate);
         if (canErr == ASE_OK) {
-            g_asio->setSampleRate((ASIOSampleRate)sampleRate);
-            g_asio->getSampleRate(&actualSR);
+            // Only switch if the requested rate genuinely differs.
+            if (actualSR < sampleRate - 1.0 || actualSR > sampleRate + 1.0) {
+                g_asio->setSampleRate((ASIOSampleRate)sampleRate);
+                g_asio->getSampleRate(&actualSR);
+            }
         } else {
-            g_asio->setSampleRate(actualSR); // confirm current rate to unblock driver
+            // Driver cannot do the requested rate.  Confirm the current rate so
+            // virtual drivers (ReaRoute) are unblocked before createBuffers.
+            g_asio->setSampleRate(actualSR);
         }
     }
 
