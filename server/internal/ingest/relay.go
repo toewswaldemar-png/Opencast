@@ -159,20 +159,24 @@ func (r *Relay) HandleIngest(w http.ResponseWriter, req *http.Request) {
 
 	// Wait for the first audio chunk, then connect to Icecast.
 	// Icecast sees an active source from the very first write — no silent startup gap.
+	t0 := time.Now()
 	firstChunk, open := <-dataCh
 	if !open {
 		log.Printf("[ingest/%s] client disconnected before sending data", streamID)
 		return
 	}
+	log.Printf("[ingest/%s] erster Chunk nach %v (%d Bytes)", streamID, time.Since(t0).Round(time.Millisecond), len(firstChunk))
 
 	iceCfg := cfg.IcecastCfg
 	iceCfg.ContentType = cfg.ContentType
 	ice := icecast.NewClient(iceCfg)
 
+	t1 := time.Now()
 	if err := ice.Connect(); err != nil {
 		log.Printf("[ingest/%s] Icecast connect failed: %v", streamID, err)
 		return
 	}
+	log.Printf("[ingest/%s] Icecast connect: %v", streamID, time.Since(t1).Round(time.Millisecond))
 
 	as := &activeStream{ice: ice, cfg: cfg, startedAt: time.Now()}
 	r.mu.Lock()
