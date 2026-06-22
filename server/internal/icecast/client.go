@@ -86,6 +86,24 @@ func (c *Client) Connect() error {
 
 	c.connected = true
 	c.startTime = time.Now()
+
+	// Icecast 2.5+ sends a second response (HTTP 200 OK) once the source has
+	// delivered its first audio frame and the mount is confirmed active.
+	// If we never read it, the TCP receive window eventually stalls and Icecast
+	// triggers source-timeout (~10 s) and disconnects.
+	// Drain all server-sent responses in the background for the life of the
+	// connection — this keeps the window open without blocking the write path.
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			c.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_, err := c.conn.Read(buf)
+			if err != nil {
+				return // connection closed or Disconnect() called
+			}
+		}
+	}()
+
 	return nil
 }
 
@@ -137,9 +155,9 @@ func (c *Client) handshakeIcecast2() error {
 		return fmt.Errorf("send headers: %w", err)
 	}
 
-	// Read the first response. Icecast sends "HTTP/1.0 100 Continue" and then
-	// starts accepting audio data immediately — it does NOT send a "200 OK"
-	// before the source starts streaming.
+	// Read the initial response. Icecast sends "HTTP/1.0 100 Continue" first.
+	// A second "HTTP/1.0 200 OK" arrives later (after the first audio frame is
+	// received); that one is drained by the goroutine started in Connect().
 	c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	code, err := readHTTPStatus(c.conn)
 	c.conn.SetReadDeadline(time.Time{})
