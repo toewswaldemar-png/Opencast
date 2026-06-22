@@ -2,7 +2,16 @@
 backend/opencast.exe
 backend/opencast-asio.exe
 backend/opencast.exe~
+backend/opencast-asio.exe~
 backend/dist/
+backend/internal/audio/*.o
+
+# V2 binaries und Logs
+client/*.exe
+client/*.exe~
+client/*.log
+server/*.exe
+server/*.exe~
 
 # Go
 backend/tmp/
@@ -13,6 +22,7 @@ frontend/dist/
 
 # Steinberg ASIO SDK (Lizenz erlaubt keine Weitergabe der Core-Header)
 ASIOSDK/
+client/ASIOSDK/
 
 # Editor / OS
 .DS_Store
