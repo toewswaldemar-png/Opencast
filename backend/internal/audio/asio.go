@@ -3,7 +3,8 @@
 package audio
 
 /*
-#cgo LDFLAGS: -lole32 -loleaut32 -ladvapi32
+#cgo CXXFLAGS: -I../../../ASIOSDK/common
+#cgo LDFLAGS: -lole32 -loleaut32 -ladvapi32 -lstdc++
 #include "asio_host.h"
 #include <stdlib.h>
 */
@@ -239,7 +240,7 @@ func OpenASIOControlPanel(clsid string) {
 
 func asioEnumerateDrivers() []Device {
 	const maxDrv = 32
-	var info [maxDrv]C.ASIODriverInfo
+	var info [maxDrv]C.ASIORegEntry
 	count := int(C.asio_enumerate_drivers(&info[0], C.int(maxDrv)))
 
 	devices := make([]Device, 0, count)

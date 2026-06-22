@@ -12,9 +12,9 @@ extern "C" {
 typedef struct {
     char name[256];
     char clsid[64];
-} ASIODriverInfo;
+} ASIORegEntry;
 
-int  asio_enumerate_drivers(ASIODriverInfo *drivers, int maxDrivers);
+int  asio_enumerate_drivers(ASIORegEntry *drivers, int maxDrivers);
 int  asio_open_driver(const char *clsidStr, char *errBuf, int errLen);
 int  asio_get_driver_info(long *numInputCh, double *defSampleRate, char *errBuf, int errLen);
 /* Probe without keeping the driver open. Skips safely if a driver is already active. */
