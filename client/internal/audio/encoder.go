@@ -63,6 +63,7 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
+		"-fflags", "+nobuffer",
 		"-f", "s16le",
 		"-ar", fmt.Sprintf("%d", inRate),
 		"-ac", fmt.Sprintf("%d", inCh),
@@ -71,11 +72,13 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 		"-b:a", fmt.Sprintf("%dk", cfg.Bitrate),
 		"-ar", fmt.Sprintf("%d", cfg.SampleRate),
 		"-ac", fmt.Sprintf("%d", cfg.Channels),
+		"-flush_packets", "1",
 		"-f", outputFmt,
 		"pipe:1",
 	}
 
 	cmd := exec.Command(ffExe, args...)
+	setupEncoderCmd(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -75,7 +75,7 @@ func (r *Relay) Register(streamID string, cfg StreamConfig) {
 	r.mu.Unlock()
 
 	go func() {
-		time.Sleep(10 * time.Second)
+		time.Sleep(30 * time.Second)
 		r.mu.Lock()
 		if _, still := r.pending[streamID]; still {
 			delete(r.pending, streamID)
