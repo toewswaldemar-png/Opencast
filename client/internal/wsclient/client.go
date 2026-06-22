@@ -234,6 +234,17 @@ func (c *Client) SendError(streamID, msg string) {
 	})
 }
 
+// ingestClient is a dedicated HTTP client for PUT /ingest requests.
+// DisableKeepAlives forces a fresh TCP connection per stream so that stale
+// connections from previous sessions never cause the 10-11 s startup delay
+// that http.DefaultClient's keep-alive pool can produce after a server restart
+// or after a previous stream on the same endpoint.
+var ingestClient = &http.Client{
+	Transport: &http.Transport{
+		DisableKeepAlives: true,
+	},
+}
+
 // PutIngest streams encoded audio to the server's ingest endpoint.
 // It blocks until the stream ends (src closed, context cancelled, or network error).
 func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader) error {
@@ -253,13 +264,14 @@ func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader
 		done <- err
 	}()
 
-	resp, err := http.DefaultClient.Do(req)
+	t0 := time.Now()
+	resp, err := ingestClient.Do(req)
 	if err != nil {
 		pr.CloseWithError(err)
 		<-done
 		return fmt.Errorf("ingest PUT: %w", err)
 	}
-	log.Printf("[ingest] PUT %s → HTTP %d", ingestURL, resp.StatusCode)
+	log.Printf("[ingest] PUT %s → HTTP %d (nach %v)", ingestURL, resp.StatusCode, time.Since(t0).Round(time.Millisecond))
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
