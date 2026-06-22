@@ -233,31 +233,42 @@ func (c *Client) SendError(streamID, msg string) {
 }
 
 // PutIngest streams encoded audio to the server's ingest endpoint.
+// It blocks until the stream ends (src closed, context cancelled, or network error).
 func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader) error {
-	// Wrap the reader in an io.Pipe so we can stream without buffering
 	pr, pw := io.Pipe()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, ingestURL, pr)
 	if err != nil {
+		pr.CloseWithError(err)
 		return fmt.Errorf("build request: %w", err)
 	}
-	// no auth header — token auth disabled
 	req.Header.Set("Content-Type", contentType)
 
-	// Copy src → pipe in background
+	done := make(chan error, 1)
 	go func() {
 		_, err := io.Copy(pw, src)
 		pw.CloseWithError(err)
+		done <- err
 	}()
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		pr.CloseWithError(err)
+		<-done
 		return fmt.Errorf("ingest PUT: %w", err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
+		pr.CloseWithError(fmt.Errorf("server returned %d", resp.StatusCode))
+		<-done
 		return fmt.Errorf("ingest server returned %d", resp.StatusCode)
+	}
+
+	// Block until the stream ends: src exhausted (encoder closed), context
+	// cancelled, or a network error — whichever comes first.
+	if err := <-done; err != nil && ctx.Err() == nil {
+		return err
 	}
 	return nil
 }
