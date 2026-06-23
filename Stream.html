@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Icecast Übersicht</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            margin: 20px;
+        }
+        table {
+            width: 100%;
+            max-width: 60%; /* Maximal 60% der Breite */
+            margin: 0 auto; /* Zentrieren */
+            border-collapse: collapse;
+            table-layout: auto; /* Dynamische Spaltenbreite basierend auf Inhalt */
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #333;
+            color: white;
+        }
+        td {
+            white-space: nowrap; /* Kein Zeilenumbruch */
+        }
+        a {
+            color: #007BFF;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .fallback {
+            color: red; /* Roter Text für Fallback-Zeilen */
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Icecast Übersicht</h1>
+    <p>Aktive Mountpoints und Zuhörer (alle 5 Sekunden aktualisiert):</p>
+    <table>
+        <thead>
+            <tr>
+                <th>Mountpoint</th>
+                <th>Hörer</th>
+            </tr>
+        </thead>
+        <tbody id="mountpoints-table">
+            <!-- Dynamische Daten -->
+        </tbody>
+    </table>
+
+    <script>
+        async function fetchIcecastData() {
+            try {
+                const response = await fetch('http://192.168.178.73:8000/status-json.xsl');
+                if (!response.ok) throw new Error('Fehler beim Abrufen der Daten');
+                
+                const data = await response.json();
+                const tableBody = document.getElementById('mountpoints-table');
+                tableBody.innerHTML = ''; // Alte Daten löschen
+
+                if (data.icestats && data.icestats.source) {
+                    const sources = Array.isArray(data.icestats.source) ? data.icestats.source : [data.icestats.source];
+                    sources.forEach(source => {
+                        const listenUrl = source.listenurl || '#';
+                        const listeners = source.listeners || 0;
+                        const isFallback = Object.keys(source).length <= 2; // Nur listeners und listenurl vorhanden?
+
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td class="${isFallback ? 'fallback' : ''}">
+                                <a href="${listenUrl}" target="_blank">${listenUrl}</a>
+                            </td>
+                            <td class="${isFallback ? 'fallback' : ''}">
+                                ${isFallback ? 'Fallback' : listeners}
+                            </td>
+                        `;
+                        tableBody.appendChild(row);
+                    });
+                } else {
+                    tableBody.innerHTML = '<tr><td colspan="2">Keine aktiven Mountpoints</td></tr>';
+                }
+            } catch (error) {
+                console.error('Fehler:', error);
+                document.getElementById('mountpoints-table').innerHTML = '<tr><td colspan="2">Fehler beim Laden der Daten</td></tr>';
+            }
+        }
+
+        // Daten sofort laden und dann alle 5 Sekunden aktualisieren
+        fetchIcecastData();
+        setInterval(fetchIcecastData, 5000);
+    </script>
+</body>
+</html>
