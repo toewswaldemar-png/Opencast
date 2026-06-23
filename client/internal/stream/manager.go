@@ -189,15 +189,8 @@ func (m *Manager) pumpIngest(ctx context.Context, sess *session) {
 			n, err := r.Read(buf)
 			if n > 0 {
 				if first {
-					log.Printf("[stream/%s] erster Encoder-Output: %d Bytes um %s", cfg.StreamID, n, time.Now().Format("15:04:05.000"))
-					tWrite := time.Now()
-					if _, werr := pw.Write(buf[:n]); werr != nil {
-						pw.CloseWithError(werr)
-						return
-					}
-					log.Printf("[stream/%s] erster pw.Write unblocked nach %v", cfg.StreamID, time.Since(tWrite).Round(time.Millisecond))
+					log.Printf("[stream/%s] erster Encoder-Output: %d Bytes", cfg.StreamID, n)
 					first = false
-					continue
 				}
 				if _, werr := pw.Write(buf[:n]); werr != nil {
 					pw.CloseWithError(werr)

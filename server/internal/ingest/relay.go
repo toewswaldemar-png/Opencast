@@ -110,7 +110,6 @@ func (r *Relay) UpdateMetadata(streamID, title string) error {
 // HandleIngest is the HTTP handler for PUT /ingest/{streamId}.
 func (r *Relay) HandleIngest(w http.ResponseWriter, req *http.Request) {
 	streamID := streamIDFromPath(req.URL.Path)
-	log.Printf("[ingest/%s] PUT empfangen um %s", streamID, time.Now().Format("15:04:05.000"))
 	if streamID == "" {
 		http.Error(w, "missing streamId", http.StatusBadRequest)
 		return

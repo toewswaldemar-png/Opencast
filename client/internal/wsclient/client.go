@@ -236,32 +236,19 @@ func (c *Client) SendError(streamID, msg string) {
 }
 
 // ingestClient is a dedicated HTTP client for PUT /ingest requests.
-// DisableKeepAlives forces a fresh TCP connection per stream so that stale
-// connections from previous sessions never cause the 10-11 s startup delay
-// that http.DefaultClient's keep-alive pool can produce after a server restart
-// or after a previous stream on the same endpoint.
+// DisableKeepAlives forces a fresh TCP connection per stream — prevents the
+// ~11 s startup delay that http.DefaultClient's keep-alive pool caused when
+// Windows took up to 11 s to signal a stale connection's TCP RST.
 var ingestClient = &http.Client{
 	Transport: &http.Transport{
 		DisableKeepAlives: true,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			log.Printf("[ingest] TCP dial %s %s …", network, addr)
-			t := time.Now()
-			c, err := (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
-			if err != nil {
-				log.Printf("[ingest] TCP dial %s %s → FEHLER %v (nach %v)", network, addr, err, time.Since(t).Round(time.Millisecond))
-			} else {
-				log.Printf("[ingest] TCP dial %s %s → OK (nach %v)", network, addr, time.Since(t).Round(time.Millisecond))
-			}
-			return c, err
-		},
+		DialContext:       (&net.Dialer{Timeout: 30 * time.Second}).DialContext,
 	},
 }
 
 // PutIngest streams encoded audio to the server's ingest endpoint.
 // It blocks until the stream ends (src closed, context cancelled, or network error).
 func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader) error {
-	log.Printf("[ingest] PutIngest gestartet um %s", time.Now().Format("15:04:05.000"))
-
 	pr, pw := io.Pipe()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, ingestURL, pr)
@@ -274,14 +261,9 @@ func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader
 	done := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 32*1024)
-		first := true
 		for {
 			n, rerr := src.Read(buf)
 			if n > 0 {
-				if first {
-					log.Printf("[ingest] io.Copy: erste %d Bytes aus Encoder-Pipe empfangen um %s", n, time.Now().Format("15:04:05.000"))
-					first = false
-				}
 				if _, werr := pw.Write(buf[:n]); werr != nil {
 					pw.CloseWithError(werr)
 					done <- werr
@@ -299,7 +281,6 @@ func PutIngest(ctx context.Context, ingestURL, contentType string, src io.Reader
 		}
 	}()
 
-	log.Printf("[ingest] Do() wird aufgerufen um %s", time.Now().Format("15:04:05.000"))
 	t0 := time.Now()
 	resp, err := ingestClient.Do(req)
 	if err != nil {
