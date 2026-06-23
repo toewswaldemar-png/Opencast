@@ -180,7 +180,17 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.clientHub.Send(ClientCmd{Type: "cmd:monitor:start", Payload: cfg})
+	// Block only if THIS card's stream is active (each card has its own monitor).
+	// Fall back to the global guard when no monitorId is present (legacy/safety).
+	blocked := false
+	if cfg.MonitorID != "" {
+		blocked = s.relay.IsRegistered(cfg.MonitorID)
+	} else {
+		blocked = s.relay.HasRegisteredStreams()
+	}
+	if !blocked {
+		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:start", Payload: cfg})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

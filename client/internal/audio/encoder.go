@@ -63,7 +63,11 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
+		// Disable input probing/analysis — FFmpeg's default analyzeduration is 5 s,
+		// which causes a ~4 s startup delay before the first encoded frame appears.
 		"-fflags", "+nobuffer",
+		"-probesize", "32",
+		"-analyzeduration", "0",
 		"-f", "s16le",
 		"-ar", fmt.Sprintf("%d", inRate),
 		"-ac", fmt.Sprintf("%d", inCh),
@@ -73,9 +77,15 @@ func NewEncoder(cfg EncoderConfig) (*Encoder, error) {
 		"-ar", fmt.Sprintf("%d", cfg.SampleRate),
 		"-ac", fmt.Sprintf("%d", cfg.Channels),
 		"-flush_packets", "1",
-		"-f", outputFmt,
-		"pipe:1",
 	}
+
+	// Disable LAME info frame and ID3v2 tag so the MP3 muxer writes the first
+	// audio frame immediately instead of buffering while building the header.
+	if outputFmt == "mp3" {
+		args = append(args, "-write_xing", "0", "-id3v2_version", "0")
+	}
+
+	args = append(args, "-f", outputFmt, "pipe:1")
 
 	cmd := exec.Command(ffExe, args...)
 	setupEncoderCmd(cmd)

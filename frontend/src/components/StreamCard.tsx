@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Mic, Trash2, RefreshCw, Settings2, AlertCircle, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
-  ServerEntry, ServerConfig, StreamStatus, LevelUpdate, EncoderConfig,
+  ServerEntry, ServerConfig, StreamStatus, EncoderConfig,
   AudioDevice, SAMPLE_RATES, StreamFormat, EncoderMode, StereoMode,
 } from '../types'
 import { apiFetch } from '../lib/api'
@@ -133,7 +133,8 @@ function AudioTab({
   const [panelOpening, setPanelOpening] = useState(false)
   const selectedDeviceRef               = useRef(selectedDevice)
   selectedDeviceRef.current             = selectedDevice
-  const selected = devices.find((d) => d.id === selectedDevice)
+  const selected       = devices.find((d) => d.id === selectedDevice)
+  const activeDevices  = devices.filter((d) => d.state === 'active')
 
   const fetchDevices = async () => {
     setLoading(true); setError(null)
@@ -169,14 +170,14 @@ function AudioTab({
       <Field label="Audiogerät">
         <div className="flex gap-2">
           <Select value={selectedDevice} onValueChange={onDeviceChange}
-            disabled={disabled || loading || devices.length === 0}>
+            disabled={disabled || loading || activeDevices.length === 0}>
             <SelectTrigger className="flex-1 h-7 text-xs">
               <SelectValue placeholder={loading ? 'Lade Geräte…' : '— Kein Gerät —'} />
             </SelectTrigger>
             <SelectContent>
-              {devices.map((d) => (
+              {activeDevices.map((d) => (
                 <SelectItem key={d.id} value={d.id} className="text-xs">
-                  {d.name}{d.state !== 'active' ? ` (${d.state})` : ''}
+                  {d.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -399,15 +400,81 @@ function StatIcon({ name, accent }: { name: string; accent: boolean }) {
   )
 }
 
+// ── VU Meter (direct DOM update, no React re-render on every frame) ───────────
+
+interface VUMeterProps {
+  vuTargetRef:  React.MutableRefObject<{ left: number; right: number }>
+  vuDecayMsRef: React.MutableRefObject<number>
+}
+
+function VUMeter({ vuTargetRef, vuDecayMsRef }: VUMeterProps) {
+  const barLRef    = useRef<HTMLDivElement>(null)
+  const barRRef    = useRef<HTMLDivElement>(null)
+  const labelLRef  = useRef<HTMLSpanElement>(null)
+  const labelRRef  = useRef<HTMLSpanElement>(null)
+  const displayRef = useRef({ left: -120, right: -120 })
+  const prevTsRef  = useRef(0)
+
+  useEffect(() => {
+    let rafId: number
+    const loop = (ts: number) => {
+      const dt   = prevTsRef.current ? ts - prevTsRef.current : 16
+      prevTsRef.current = ts
+      const tgt  = vuTargetRef.current
+      const cur  = displayRef.current
+      const fall = (60 / Math.max(100, vuDecayMsRef.current)) * dt
+      const newL = tgt.left  >= cur.left  ? tgt.left  : Math.max(tgt.left,  cur.left  - fall)
+      const newR = tgt.right >= cur.right ? tgt.right : Math.max(tgt.right, cur.right - fall)
+      if (Math.abs(newL - cur.left) > 0.05 || Math.abs(newR - cur.right) > 0.05) {
+        displayRef.current = { left: newL, right: newR }
+        if (barLRef.current)   barLRef.current.style.width   = `${pct(newL)}%`
+        if (barRRef.current)   barRRef.current.style.width   = `${pct(newR)}%`
+        if (labelLRef.current) labelLRef.current.textContent = newL <= DB_MIN ? '−60' : newL.toFixed(0)
+        if (labelRRef.current) labelRRef.current.textContent = newR <= DB_MIN ? '−60' : newR.toFixed(0)
+      }
+      rafId = requestAnimationFrame(loop)
+    }
+    rafId = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(rafId)
+  }, []) // eslint-disable-line
+
+  return (
+    <div className="px-4 pb-4 flex flex-col gap-1.5">
+      {(['L', 'R'] as const).map((ch) => (
+        <div key={ch} className="flex items-center gap-2">
+          <span className="text-[10px] font-bold text-muted-foreground/50 w-3 select-none">{ch}</span>
+          <div className="flex-1 h-[5px] rounded-full bg-muted overflow-hidden">
+            <div
+              ref={ch === 'L' ? barLRef : barRRef}
+              className="h-full rounded-full"
+              style={{
+                width: '0%',
+                background: 'linear-gradient(to right, #22c55e 0%, #86efac 55%, #facc15 70%, #f97316 85%, #ef4444 100%)',
+                transition: 'width 16ms linear',
+              }}
+            />
+          </div>
+          <span
+            ref={ch === 'L' ? labelLRef : labelRRef}
+            className="text-[10px] font-mono text-muted-foreground/50 w-8 text-right select-none"
+          >
+            −60
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 // ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
   entry:           ServerEntry
   status:          StreamStatus | null
-  levels:          LevelUpdate
+  vuTargetRef:     React.MutableRefObject<{ left: number; right: number }>
+  vuDecayMsRef:    React.MutableRefObject<number>
   encoderConfig:   EncoderConfig
   selectedDevice:  string
-  anyRunning:      boolean
   isLoading:       boolean
   error?:          string | null
   onStart:         () => void
@@ -422,7 +489,7 @@ interface Props {
 // ── Main Card ─────────────────────────────────────────────────────────────────
 
 export default function StreamCard({
-  entry, status, levels, encoderConfig, selectedDevice, anyRunning,
+  entry, status, vuTargetRef, vuDecayMsRef, encoderConfig, selectedDevice,
   isLoading, error, onStart, onStop, onChange, onLabelChange, onDeviceChange, onEncoderChange, onRemove,
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -484,7 +551,6 @@ export default function StreamCard({
   const isLive         = !!(status?.running && status?.connected)
   const isReconnecting = !!(status?.running && !status?.connected && status?.reconnecting)
   const isConnecting   = !!(status?.running && !status?.connected && !status?.reconnecting)
-  const displayLevels  = levels
 
   return (
     <div className={cn(
@@ -566,26 +632,7 @@ export default function StreamCard({
           </div>
 
           {/* VU Meters */}
-          <div className="px-4 pb-4 flex flex-col gap-1.5">
-            {(['L', 'R'] as const).map((ch) => {
-              const db = ch === 'L' ? displayLevels.left : displayLevels.right
-              return (
-                <div key={ch} className="flex items-center gap-2">
-                  <span className="text-[10px] font-bold text-muted-foreground/50 w-3 select-none">{ch}</span>
-                  <div className="flex-1 h-[5px] rounded-full bg-muted overflow-hidden">
-                    <div className="h-full rounded-full" style={{
-                      width: `${pct(db)}%`,
-                      background: 'linear-gradient(to right, #22c55e 0%, #86efac 55%, #facc15 70%, #f97316 85%, #ef4444 100%)',
-                      transition: 'width 22ms linear',
-                    }} />
-                  </div>
-                  <span className="text-[10px] font-mono text-muted-foreground/50 w-8 text-right select-none">
-                    {db <= DB_MIN ? '−60' : db.toFixed(0)}
-                  </span>
-                </div>
-              )
-            })}
-          </div>
+          <VUMeter vuTargetRef={vuTargetRef} vuDecayMsRef={vuDecayMsRef} />
 
           {/* Stats */}
           <div className="grid grid-cols-3 border-t border-border">
@@ -656,10 +703,10 @@ export default function StreamCard({
           </TabsContent>
           <TabsContent value="audio">
             <AudioTab selectedDevice={selectedDevice} encoderConfig={encoderConfig}
-              disabled={anyRunning} onDeviceChange={onDeviceChange} onEncoderChange={onEncoderChange} />
+              disabled={!!status?.running} onDeviceChange={onDeviceChange} onEncoderChange={onEncoderChange} />
           </TabsContent>
           <TabsContent value="encoder">
-            <EncoderTab encoderConfig={encoderConfig} disabled={anyRunning} onEncoderChange={onEncoderChange} />
+            <EncoderTab encoderConfig={encoderConfig} disabled={!!status?.running} onEncoderChange={onEncoderChange} />
           </TabsContent>
         </Tabs>
       )}

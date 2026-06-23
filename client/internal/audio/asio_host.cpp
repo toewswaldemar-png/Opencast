@@ -99,14 +99,9 @@ static void asio_buffer_switch(long idx, ASIOBool directProcess) {
         }
     }
 
-    // Zero output channels so the driver receives silence (duplex mode)
-    for (int i = 0; i < g_numOutCh; i++) {
-        void *outBuf = g_bufInfos[g_numChannels + i].buffers[idx];
-        if (outBuf) memset(outBuf, 0, (size_t)g_bufferSize * 4);  // 4 bytes covers int32/float32
-    }
-
-    // Signal output-ready — some drivers (e.g. ReaRoute) gate callbacks until this is called
-    if (g_numOutCh > 0) g_asio->outputReady();
+    // Signal output-ready unconditionally — ReaRoute gates callbacks on this
+    // call regardless of whether output channels were registered.
+    if (g_asio) g_asio->outputReady();
 
     goAsioBufferCallback(g_pcmBuf, (int)g_bufferSize, (int)g_sampleType, g_numChannels);
 }
@@ -249,19 +244,22 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
         g_bufInfos[i].channelNum = (long)channels[i];
     }
 
-    // Output channels (duplex): some drivers (including ReaRoute) only activate
-    // input callbacks when the client also registers output channels. We zero
-    // the output buffers in every callback so they produce silence in REAPER.
-    long numInDrv = 0, numOutDrv = 0;
-    g_asio->getChannels(&numInDrv, &numOutDrv);
-    int numOut = (numOutDrv >= 2) ? 2 : (int)numOutDrv;
-    for (int i = 0; i < numOut; i++) {
-        g_bufInfos[numChannels + i].isInput    = ASIOFalse;
-        g_bufInfos[numChannels + i].channelNum = (long)i;
-    }
-    g_numOutCh = numOut;
+    // Do NOT register output channels.
+    //
+    // Registering output channels with virtual routing drivers (e.g. ReaRoute)
+    // signals to the host DAW (Reaper) that an external client is consuming its
+    // audio output.  Reaper responds by routing its internal mix bus through
+    // ReaRoute — even when the user has not configured any explicit sends — so
+    // our ASIO input buffers fill with Reaper's idle engine audio rather than
+    // silence.  WASAPI-based capture tools (e.g. Butt) do not trigger this
+    // because they bypass the ASIO output path entirely.
+    //
+    // outputReady() is still called unconditionally in asio_buffer_switch so
+    // that drivers which need it to clock their callbacks (ReaRoute included)
+    // continue to fire normally.
+    g_numOutCh = 0;
 
-    long totalCh = (long)(numChannels + numOut);
+    long totalCh = (long)numChannels;
     ASIOError err = g_asio->createBuffers(g_bufInfos, totalCh, bufferSize, &g_callbacks);
     if (err != ASE_OK) { snprintf(errBuf, errLen, "createBuffers Fehler: %ld", err); return -1; }
 
@@ -271,11 +269,35 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
     err = g_asio->getChannelInfo(&chInfo);
     g_sampleType = (err == ASE_OK) ? (long)chInfo.type : (long)ASIOSTInt32LSB;
 
+    // Zero both double-buffer slots for all input channels.
+    // Virtual routing drivers (e.g. ReaRoute) allocate their shared-memory
+    // buffers without zeroing them, so uninitialized or stale data from a
+    // previous Reaper session would otherwise appear as audio signal in the
+    // VU meter even when Reaper is not running.  When Reaper is absent, it
+    // never writes into these buffers, so they stay zero → silence reported.
+    // When Reaper is active, it overwrites the buffers on every callback, so
+    // this zero-init has no effect on real-audio fidelity.
+    {
+        size_t bytesPerFrame;
+        switch (g_sampleType) {
+            case ASIOSTInt16LSB: case ASIOSTInt16MSB: bytesPerFrame = 2; break;
+            case ASIOSTInt24LSB:                      bytesPerFrame = 3; break;
+            case ASIOSTFloat64LSB:                    bytesPerFrame = 8; break;
+            default:                                  bytesPerFrame = 4; break;
+        }
+        for (int i = 0; i < numChannels; i++) {
+            for (int b = 0; b < 2; b++) {
+                void *buf = g_bufInfos[i].buffers[b];
+                if (buf) memset(buf, 0, (size_t)bufferSize * bytesPerFrame);
+            }
+        }
+    }
+
     g_bufferSize  = bufferSize;
     g_numChannels = numChannels;
 
     free(g_pcmBuf);
-    g_pcmBuf = (int16_t *)malloc((size_t)numChannels * (size_t)bufferSize * sizeof(int16_t));
+    g_pcmBuf = (int16_t *)calloc((size_t)numChannels * (size_t)bufferSize, sizeof(int16_t));
     if (!g_pcmBuf) {
         g_asio->disposeBuffers();
         g_numChannels = 0; g_bufferSize = 0; g_numOutCh = 0;

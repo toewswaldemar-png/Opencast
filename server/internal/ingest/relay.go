@@ -67,6 +67,13 @@ func (r *Relay) IsRegistered(streamID string) bool {
 	return inPending || inActive
 }
 
+// HasRegisteredStreams reports whether any stream is currently pending or active.
+func (r *Relay) HasRegisteredStreams() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.pending) > 0 || len(r.active) > 0
+}
+
 // Register stores a stream config, making it ready for an ingest connection.
 // If no PUT /ingest arrives within 10 s, the entry is removed automatically.
 func (r *Relay) Register(streamID string, cfg StreamConfig) {

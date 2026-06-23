@@ -5,6 +5,7 @@ package stream
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 
 	"client/internal/audio"
@@ -17,7 +18,8 @@ type MonitorConfig struct {
 }
 
 type Monitor struct {
-	mu      sync.Mutex
+	opMu    sync.Mutex // serializes Start/Stop so Stop() waits for an in-progress Start()
+	mu      sync.Mutex // protects running/cap state, also held by run() goroutine
 	running bool
 	lastCfg MonitorConfig
 	cancel  context.CancelFunc
@@ -35,47 +37,57 @@ func (m *Monitor) SetLevelCallback(cb func(audio.LevelUpdate)) {
 }
 
 func (m *Monitor) Start(cfg MonitorConfig) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Loop because stopLocked drops the mutex while waiting for cap.Stop().
-	// A concurrent Start() can sneak in and install a new capturer in that window;
-	// we must stop that one too before installing ours.
-	for m.running {
-		if m.lastCfg == cfg {
-			return nil
-		}
-		m.stopLocked()
-	}
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 
 	if cfg.SampleRate == 0 { cfg.SampleRate = 44100 }
 	if cfg.Channels == 0   { cfg.Channels = 2 }
 
-	cap := audio.NewCapturer(audio.CaptureConfig{
+	m.mu.Lock()
+	if m.running && m.lastCfg == cfg {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+
+	// Open the new capturer without holding m.mu (avoids deadlock with run()).
+	// opMu ensures a concurrent Stop() blocks here and only runs after we return,
+	// so the device is guaranteed free before manager.Start() opens it.
+	// If the new device fails (e.g. ASIO exclusive conflict), we return early and
+	// the old monitor keeps running — VU stays live instead of going dark.
+	newCap := audio.NewCapturer(audio.CaptureConfig{
 		DeviceID:   cfg.DeviceID,
 		SampleRate: cfg.SampleRate,
 		Channels:   cfg.Channels,
 		BitDepth:   16,
 	})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	if err := cap.Start(ctx); err != nil {
-		cancel()
+	newCtx, newCancel := context.WithCancel(context.Background())
+	if err := newCap.Start(newCtx); err != nil {
+		newCancel()
 		return fmt.Errorf("monitor: %w", err)
 	}
 
+	log.Printf("[monitor] Capturer gestartet: device=%s sr=%d ch=%d", cfg.DeviceID, cfg.SampleRate, cfg.Channels)
+
+	// New capturer is up — stop the old one and install the new.
+	m.mu.Lock()
+	if m.running {
+		m.stopLocked() // drops and re-acquires m.mu internally
+	}
+	done := make(chan struct{})
 	m.running = true
 	m.lastCfg = cfg
-	m.cancel  = cancel
-	m.done    = make(chan struct{})
-	m.cap     = cap
+	m.cancel  = newCancel
+	m.done    = done
+	m.cap     = newCap
+	m.mu.Unlock()
 
-	go m.run(ctx, cap)
+	go m.run(newCtx, newCap, done)
 	return nil
 }
 
-func (m *Monitor) run(ctx context.Context, cap audio.Capturer) {
-	defer close(m.done)
+func (m *Monitor) run(ctx context.Context, cap audio.Capturer, done chan struct{}) {
+	defer close(done) // use the captured channel, not m.done which stopLocked() nils out
 	for {
 		select {
 		case <-ctx.Done():
@@ -93,11 +105,15 @@ func (m *Monitor) run(ctx context.Context, cap audio.Capturer) {
 }
 
 func (m *Monitor) Stop() {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
 	m.mu.Lock()
 	if !m.running {
 		m.mu.Unlock()
 		return
 	}
+	log.Printf("[monitor] Stop: device=%s", m.lastCfg.DeviceID)
 	m.stopLocked()
 	m.mu.Unlock()
 }

@@ -43,6 +43,7 @@ type CmdStopPayload struct {
 
 // CmdMonitorPayload for monitor start/stop.
 type CmdMonitorPayload struct {
+	MonitorID  string `json:"monitorId"`  // card entry ID — used to route level updates back
 	DeviceID   string `json:"deviceId"`
 	SampleRate uint32 `json:"sampleRate"`
 	Channels   uint16 `json:"channels"`
@@ -104,9 +105,7 @@ func (c *Client) connect(ctx context.Context) error {
 	log.Printf("[ws] Verbunden mit %s", c.serverURL)
 
 	// Send device list immediately on connect
-	log.Printf("[ws] sendDevices: start")
 	c.sendDevices()
-	log.Printf("[ws] sendDevices: done")
 
 	// Read loop
 	defer func() {
@@ -208,11 +207,12 @@ func (c *Client) SendLevel(streamID string, lvl audio.LevelUpdate) {
 	})
 }
 
-// SendMonitorLevel sends a monitor VU level update.
-func (c *Client) SendMonitorLevel(lvl audio.LevelUpdate) {
+// SendMonitorLevel sends a monitor VU level update tagged with the card ID.
+func (c *Client) SendMonitorLevel(monitorID string, lvl audio.LevelUpdate) {
 	c.Send("monitor:level", map[string]any{
-		"left":  lvl.Left,
-		"right": lvl.Right,
+		"monitorId": monitorID,
+		"left":      lvl.Left,
+		"right":     lvl.Right,
 	})
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"runtime"
 	"strings"
@@ -146,6 +147,8 @@ func (c *WasapiCapturer) initCapture() (*wca.IMMDeviceEnumerator, *wca.IAudioCli
 		de.Release()
 		return nil, nil, nil, fmt.Errorf("start audio client: %w", err)
 	}
+	log.Printf("[wasapi] Capture gestartet: device=%s sr=%d ch=%d bits=%d float=%v",
+		c.cfg.DeviceID, c.actual.SampleRate, c.actual.Channels, mixFmt.WBitsPerSample, c.isFloat)
 	return de, ac, cc, nil
 }
 

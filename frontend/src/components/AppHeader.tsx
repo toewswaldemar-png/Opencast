@@ -1,18 +1,21 @@
-import { Radio, Plus, Settings2 } from 'lucide-react'
+import { Radio, Plus, Settings2, Mic, MicOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
   DropdownMenuItem, DropdownMenuSeparator, DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu'
 
 interface Props {
-  streamCount:     number
-  liveCount:       number
-  onAdd:           () => void
-  onOpenSettings:  () => void
+  streamCount:      number
+  liveCount:        number
+  monitorEnabled:   boolean
+  onAdd:            () => void
+  onOpenSettings:   () => void
+  onToggleMonitor:  () => void
 }
 
-export default function AppHeader({ streamCount, liveCount, onAdd, onOpenSettings }: Props) {
+export default function AppHeader({ streamCount, liveCount, monitorEnabled, onAdd, onOpenSettings, onToggleMonitor }: Props) {
   return (
     <header className="flex items-center px-4 py-3 border-b border-border bg-card flex-shrink-0">
       <div className="flex items-center gap-3">
@@ -32,7 +35,22 @@ export default function AppHeader({ streamCount, liveCount, onAdd, onOpenSetting
         </div>
       </div>
 
-      <div className="ml-auto">
+      <div className="ml-auto flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn(
+            'h-8 w-8',
+            monitorEnabled
+              ? 'text-teal-600 hover:text-teal-700'
+              : 'text-muted-foreground hover:text-foreground',
+          )}
+          onClick={onToggleMonitor}
+          title={monitorEnabled ? 'Monitor aktiv — klicken zum Deaktivieren' : 'Monitor aus — klicken zum Aktivieren'}
+        >
+          {monitorEnabled ? <Mic size={15} /> : <MicOff size={15} />}
+        </Button>
+
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground">

@@ -35,8 +35,8 @@ func main() {
 	}
 
 	hub := api.NewHub()
-	clientHub := api.NewClientHub(hub)
 	relay := ingest.NewRelay()
+	clientHub := api.NewClientHub(hub, relay)
 	srv := api.NewServer(store, hub, clientHub, relay, baseURL)
 
 	// When a new browser connects, push the current Windows-client state immediately

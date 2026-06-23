@@ -70,7 +70,7 @@ export interface LevelUpdate {
 export type AllStreamStatus = Record<string, StreamStatus>
 
 export type WSPayload =
-  | { type: 'level';        payload: LevelUpdate }
+  | { type: 'level';        payload: LevelUpdate & { streamId?: string; monitorId?: string } }
   | { type: 'status';       payload: AllStreamStatus }
   | { type: 'error';        payload: { streamId?: string; message: string } }
   | { type: 'clientOnline'; payload: boolean }

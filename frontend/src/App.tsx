@@ -21,18 +21,39 @@ export default function App() {
   const [encoderConfig, setEncoderConfig] = useState<EncoderConfig>(DEFAULT_ENCODER)
   const [selectedDevice, setSelectedDevice] = useState('')
   const [allStatuses, setAllStatuses]     = useState<AllStreamStatus>({})
-  const [levels, setLevels]               = useState<LevelUpdate>(EMPTY_LEVELS)
   const [loadingIds, setLoadingIds]       = useState<Set<string>>(new Set())
   const [streamErrors, setStreamErrors]   = useState<Record<string, string>>({})
   const [wsConnected, setWsConnected]         = useState(false)
   const [clientConnected, setClientConnected] = useState(false)
   const [autoReconnect, setAutoReconnect]     = useState(true)
   const [settingsOpen, setSettingsOpen]   = useState(false)
+  const [monitorEnabled, setMonitorEnabled] = useState(true)
+  const [vuDecayMs, setVuDecayMs] = useState(() => {
+    const s = localStorage.getItem('vuDecayMs')
+    return s ? Math.max(100, Math.min(5000, Number(s))) : 1000
+  })
 
-  const levelsDecayRef = useRef<number | null>(null)
+  const handleVuDecayChange = (ms: number) => {
+    setVuDecayMs(ms)
+    localStorage.setItem('vuDecayMs', String(ms))
+  }
+
+  const vuDecayMsRef = useRef(vuDecayMs)
+  vuDecayMsRef.current = vuDecayMs
+
+  // Stable per-card level refs keyed by entry.id.
+  // Each StreamCard always receives the same object so the VUMeter rAF loop
+  // keeps reading the right target without being remounted.
+  // Monitor levels are written to all idle cards; stream:level goes to the
+  // specific card whose streamId matches.
+  const cardLevelRefsRef  = useRef<Record<string, React.MutableRefObject<LevelUpdate>>>({})
+  const monitorDecayRef   = useRef<number | null>(null)
+
   const configReady    = useRef(false)
   const serversRef     = useRef(servers)
   serversRef.current   = servers
+  const allStatusesRef = useRef(allStatuses)
+  allStatusesRef.current = allStatuses
 
   // Load config on start — migrate old format (entries without deviceId/encoderConfig)
   useEffect(() => {
@@ -111,9 +132,34 @@ export default function App() {
         }
       }
     } else if (msg.type === 'level') {
-      setLevels(msg.payload)
-      if (levelsDecayRef.current) clearTimeout(levelsDecayRef.current)
-      levelsDecayRef.current = setTimeout(() => setLevels(EMPTY_LEVELS), 200) as unknown as number
+      const { streamId, monitorId, left, right } = msg.payload
+      if (streamId) {
+        // Stream level → this card only.
+        const ref = cardLevelRefsRef.current[streamId]
+        if (ref) ref.current = { left, right }
+      } else if (monitorId) {
+        // Per-card monitor level → this card only.
+        const ref = cardLevelRefsRef.current[monitorId]
+        if (ref) ref.current = { left, right }
+      } else {
+        // Legacy / fallback: no ID — push to all idle cards with decay.
+        const statuses = allStatusesRef.current
+        for (const srv of serversRef.current) {
+          if (!statuses[srv.id]) {
+            const ref = cardLevelRefsRef.current[srv.id]
+            if (ref) ref.current = { left, right }
+          }
+        }
+        if (monitorDecayRef.current) clearTimeout(monitorDecayRef.current)
+        monitorDecayRef.current = setTimeout(() => {
+          for (const srv of serversRef.current) {
+            if (!allStatusesRef.current[srv.id]) {
+              const ref = cardLevelRefsRef.current[srv.id]
+              if (ref) ref.current = EMPTY_LEVELS
+            }
+          }
+        }, 200) as unknown as number
+      }
     } else if (msg.type === 'error') {
       const { streamId, message } = msg.payload
       if (streamId) {
@@ -124,20 +170,33 @@ export default function App() {
   }, [])
   useWebSocket(handleWSMessage)
 
-  // Auto-monitor: fires when device, encoder, or client-connection state changes.
+  // Per-card auto-monitor: for each idle card (not streaming), start its own monitor.
+  // Fires when device/encoder/client-connection/monitorEnabled/streaming-state changes.
   useEffect(() => {
-    if (!selectedDevice || !clientConnected) return
-    if (Object.keys(allStatuses).length > 0) return
-    apiFetch('/api/monitor/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId:   selectedDevice,
-        sampleRate: encoderConfig.sampleRate,
-        channels:   encoderConfig.channels,
-      }),
-    }).catch(() => {})
-  }, [selectedDevice, encoderConfig.sampleRate, encoderConfig.channels, clientConnected, Object.keys(allStatuses).join(',')]) // eslint-disable-line
+    if (!clientConnected || !monitorEnabled) {
+      apiFetch('/api/monitor/stop', { method: 'POST' }).catch(() => {})
+      return
+    }
+    for (const entry of servers) {
+      if (allStatuses[entry.id]) continue  // card is currently streaming
+      const device = entry.deviceId || selectedDevice
+      if (!device) continue
+      apiFetch('/api/monitor/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          monitorId:  entry.id,
+          deviceId:   device,
+          sampleRate: entry.encoderConfig.sampleRate,
+          channels:   entry.encoderConfig.channels,
+        }),
+      }).catch(() => {})
+    }
+  }, [ // eslint-disable-line
+    clientConnected, monitorEnabled, selectedDevice,
+    servers.map(s => `${s.id}:${s.deviceId}:${s.encoderConfig.sampleRate}:${s.encoderConfig.channels}`).join(','),
+    Object.keys(allStatuses).join(','),
+  ])
 
   // Stream controls
   const setLoading = (id: string, on: boolean) =>
@@ -218,26 +277,35 @@ export default function App() {
       <AppHeader
         streamCount={servers.length}
         liveCount={liveCount}
+        monitorEnabled={monitorEnabled}
         onAdd={addServer}
         onOpenSettings={() => setSettingsOpen(true)}
+        onToggleMonitor={() => setMonitorEnabled((v) => !v)}
       />
       <GlobalSettingsDialog
         open={settingsOpen}
         autoReconnect={autoReconnect}
+        vuDecayMs={vuDecayMs}
         onClose={() => setSettingsOpen(false)}
         onReconnectChange={setAutoReconnect}
+        onVuDecayChange={handleVuDecayChange}
       />
 
       <main className="flex-1 overflow-y-auto p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 content-start items-start">
-        {servers.map((entry) => (
+        {servers.map((entry) => {
+          // Lazily create a stable ref for this card on first render.
+          if (!cardLevelRefsRef.current[entry.id]) {
+            cardLevelRefsRef.current[entry.id] = { current: EMPTY_LEVELS }
+          }
+          return (
           <StreamCard
             key={entry.id}
             entry={entry}
             status={allStatuses[entry.id] ?? null}
-            levels={levels}
+            vuTargetRef={cardLevelRefsRef.current[entry.id]}
+            vuDecayMsRef={vuDecayMsRef}
             encoderConfig={entry.encoderConfig}
             selectedDevice={entry.deviceId || selectedDevice}
-            anyRunning={Object.keys(allStatuses).length > 0}
             isLoading={loadingIds.has(entry.id)}
             error={streamErrors[entry.id] ?? null}
             onStart={() => handleStart(entry.id)}
@@ -248,7 +316,8 @@ export default function App() {
             onEncoderChange={(p) => updateServerEncoder(entry.id, p)}
             onRemove={!allStatuses[entry.id] ? () => removeServer(entry.id) : undefined}
           />
-        ))}
+        )})}
+
 
         {servers.length === 0 && (
           <div className="col-span-full flex flex-col items-center justify-center py-24 text-muted-foreground gap-3">

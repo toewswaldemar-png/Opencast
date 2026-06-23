@@ -164,7 +164,9 @@ func (m *Manager) pumpAudio(ctx context.Context, cap audio.Capturer, enc *audio.
 			if !ok {
 				return
 			}
-			enc.Write(pcm)
+			if _, err := enc.Write(pcm); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -263,6 +265,7 @@ func (m *Manager) Stop(streamID string) {
 	delete(m.sessions, streamID)
 	m.mu.Unlock()
 
+	log.Printf("[stream/%s] Stop: Capturer und Encoder werden beendet", streamID)
 	sess.cancel()
 	sess.capturer.Stop()
 	sess.encoder.Close()
@@ -271,6 +274,33 @@ func (m *Manager) Stop(streamID string) {
 	case <-sess.done:
 	case <-time.After(5 * time.Second):
 	}
+}
+
+// IsRunning reports whether at least one streaming session is active.
+func (m *Manager) IsRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.sessions) > 0
+}
+
+// IsStreamRunning reports whether the session with the given ID is active.
+func (m *Manager) IsStreamRunning(streamID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.sessions[streamID]
+	return ok
+}
+
+// IsDeviceInUse reports whether any active session is capturing the given device.
+func (m *Manager) IsDeviceInUse(deviceID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.sessions {
+		if s.cfg.DeviceID == deviceID {
+			return true
+		}
+	}
+	return false
 }
 
 // StopAll stops every running session.

@@ -34,6 +34,7 @@ type CmdStopPayload struct {
 
 // CmdMonitorPayload tells the client to start/stop the VU monitor.
 type CmdMonitorPayload struct {
+	MonitorID  string `json:"monitorId"`  // card entry ID
 	DeviceID   string `json:"deviceId"`
 	SampleRate uint32 `json:"sampleRate"`
 	Channels   uint16 `json:"channels"`
@@ -45,14 +46,20 @@ type clientMsg struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
+// StreamUnregisterer is implemented by ingest.Relay; avoids an import cycle.
+type StreamUnregisterer interface {
+	Unregister(streamID string)
+}
+
 // ClientHub manages the single Windows client connection.
 type ClientHub struct {
 	mu      sync.RWMutex
 	conn    *clientConn
-	devices []any       // last device list reported by client
+	devices []any          // last device list reported by client
 	status  map[string]any // last stream statuses reported by client
 
-	hub *Hub // browser hub for relaying messages
+	hub   *Hub
+	relay StreamUnregisterer // used to clean up pending entries on client error
 }
 
 type clientConn struct {
@@ -61,9 +68,10 @@ type clientConn struct {
 	done chan struct{}
 }
 
-func NewClientHub(hub *Hub) *ClientHub {
+func NewClientHub(hub *Hub, relay StreamUnregisterer) *ClientHub {
 	return &ClientHub{
 		hub:    hub,
+		relay:  relay,
 		status: make(map[string]any),
 	}
 }
@@ -154,8 +162,13 @@ func (ch *ClientHub) handleClientMsg(msg clientMsg) {
 		}
 
 	case "stream:error":
-		var payload any
+		var payload map[string]any
 		if err := json.Unmarshal(msg.Payload, &payload); err == nil {
+			// If the stream never started (still pending in relay), clean it up now
+			// so the user can retry immediately instead of waiting for the 30 s timeout.
+			if id, ok := payload["streamId"].(string); ok && ch.relay != nil {
+				ch.relay.Unregister(id)
+			}
 			ch.hub.Broadcast(MsgError, payload)
 		}
 	}
