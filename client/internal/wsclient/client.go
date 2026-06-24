@@ -110,12 +110,31 @@ func (c *Client) connect(ctx context.Context) error {
 	c.sendDevices()
 
 	// Read loop
+	connDone := make(chan struct{})
 	defer func() {
+		close(connDone)
 		c.mu.Lock()
 		c.conn = nil
 		c.mu.Unlock()
 		conn.Close()
 		log.Println("[ws] Verbindung getrennt")
+	}()
+
+	// Heartbeat: keep the server's 90s read deadline alive when the client is idle.
+	// The server only resets its deadline on TEXT messages — Pong control frames don't count.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.Send("heartbeat", nil)
+			case <-connDone:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
 	}()
 
 	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
