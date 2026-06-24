@@ -31,10 +31,11 @@ var ksdataformatSubtypeIEEEFloat = [16]byte{
 // ── WasapiCapturer ───────────────────────────────────────────────────────────
 
 type WasapiCapturer struct {
-	cfg     CaptureConfig
-	actual  CaptureConfig
-	isFloat bool
-	srcBPS  uint32
+	cfg      CaptureConfig
+	actual   CaptureConfig
+	nativeCh int // actual number of channels from WASAPI mix format
+	isFloat  bool
+	srcBPS   uint32
 
 	pcmOut chan []byte
 	levels chan LevelUpdate
@@ -116,11 +117,13 @@ func (c *WasapiCapturer) initCapture() (*wca.IMMDeviceEnumerator, *wca.IAudioCli
 
 	c.isFloat = wasapiIsFloat(mixFmt)
 	c.srcBPS = uint32(mixFmt.WBitsPerSample) / 8
+	c.nativeCh = int(mixFmt.NChannels)
 	c.actual = CaptureConfig{
-		DeviceID:   c.cfg.DeviceID,
-		SampleRate: mixFmt.NSamplesPerSec,
-		Channels:   mixFmt.NChannels,
-		BitDepth:   16,
+		DeviceID:    c.cfg.DeviceID,
+		SampleRate:  mixFmt.NSamplesPerSec,
+		ChannelLeft:  c.cfg.ChannelLeft,
+		ChannelRight: c.cfg.ChannelRight,
+		BitDepth:    16,
 	}
 
 	var streamFlags uint32
@@ -147,8 +150,8 @@ func (c *WasapiCapturer) initCapture() (*wca.IMMDeviceEnumerator, *wca.IAudioCli
 		de.Release()
 		return nil, nil, nil, fmt.Errorf("start audio client: %w", err)
 	}
-	log.Printf("[wasapi] Capture gestartet: device=%s sr=%d ch=%d bits=%d float=%v",
-		c.cfg.DeviceID, c.actual.SampleRate, c.actual.Channels, mixFmt.WBitsPerSample, c.isFloat)
+	log.Printf("[wasapi] Capture gestartet: device=%s sr=%d nativeCh=%d L=%d R=%d bits=%d float=%v",
+		c.cfg.DeviceID, c.actual.SampleRate, c.nativeCh, c.cfg.ChannelLeft, c.cfg.ChannelRight, mixFmt.WBitsPerSample, c.isFloat)
 	return de, ac, cc, nil
 }
 
@@ -246,7 +249,7 @@ func (c *WasapiCapturer) readAvailablePackets(cc *wca.IAudioCaptureClient) {
 			break
 		}
 
-		byteCount := numFrames * uint32(c.actual.Channels) * c.srcBPS
+		byteCount := numFrames * uint32(c.nativeCh) * c.srcBPS
 		raw := make([]byte, byteCount)
 		if flags&wca.AUDCLNT_BUFFERFLAGS_SILENT == 0 {
 			copy(raw, unsafe.Slice(data, byteCount))
@@ -262,6 +265,16 @@ func (c *WasapiCapturer) readAvailablePackets(cc *wca.IAudioCaptureClient) {
 		default:
 			pcm = wasapiIntToI16(raw, c.srcBPS)
 		}
+
+		leftIdx := int(c.cfg.ChannelLeft) - 1
+		rightIdx := int(c.cfg.ChannelRight) - 1
+		if leftIdx < 0 {
+			leftIdx = 0
+		}
+		if rightIdx < 0 {
+			rightIdx = min(1, c.nativeCh-1)
+		}
+		pcm = wasapiExtractChannels(pcm, c.nativeCh, leftIdx, rightIdx)
 
 		c.sendLevels(pcm)
 		select {
@@ -312,24 +325,47 @@ func wasapiIntToI16(src []byte, srcBPS uint32) []byte {
 	return out
 }
 
+// wasapiExtractChannels extracts two channels (0-based leftIdx, rightIdx) from
+// N-channel interleaved int16 LE PCM and returns 2-channel interleaved int16 LE PCM.
+func wasapiExtractChannels(src []byte, totalCh, leftIdx, rightIdx int) []byte {
+	if totalCh <= 0 || len(src) == 0 {
+		return src
+	}
+	if leftIdx >= totalCh {
+		leftIdx = totalCh - 1
+	}
+	if rightIdx >= totalCh {
+		rightIdx = totalCh - 1
+	}
+	if totalCh == 2 && leftIdx == 0 && rightIdx == 1 {
+		return src
+	}
+	frameSize := totalCh * 2
+	frames := len(src) / frameSize
+	out := make([]byte, frames*4)
+	for i := range frames {
+		base := i * frameSize
+		out[i*4+0] = src[base+leftIdx*2+0]
+		out[i*4+1] = src[base+leftIdx*2+1]
+		out[i*4+2] = src[base+rightIdx*2+0]
+		out[i*4+3] = src[base+rightIdx*2+1]
+	}
+	return out
+}
+
 func (c *WasapiCapturer) sendLevels(pcm []byte) {
-	if len(pcm) < 2 {
+	if len(pcm) < 4 {
 		return
 	}
 	var peakL, peakR float64
-	ch := int(c.actual.Channels)
-	for i := 0; i+1 < len(pcm); i += 2 * ch {
+	for i := 0; i+3 < len(pcm); i += 4 {
 		sL := math.Abs(float64(int16(uint16(pcm[i])|uint16(pcm[i+1])<<8)) / 32768.0)
 		if sL > peakL {
 			peakL = sL
 		}
-		if ch >= 2 && i+3 < len(pcm) {
-			sR := math.Abs(float64(int16(uint16(pcm[i+2])|uint16(pcm[i+3])<<8)) / 32768.0)
-			if sR > peakR {
-				peakR = sR
-			}
-		} else {
-			peakR = peakL
+		sR := math.Abs(float64(int16(uint16(pcm[i+2])|uint16(pcm[i+3])<<8)) / 32768.0)
+		if sR > peakR {
+			peakR = sR
 		}
 	}
 	toDBFS := func(v float64) float64 {

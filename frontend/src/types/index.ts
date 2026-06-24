@@ -31,22 +31,24 @@ export type EncoderMode   = 'cbr' | 'vbr'
 export type StereoMode    = 'auto' | 'stereo' | 'joint' | 'mono'
 
 export interface EncoderConfig {
-  format:     StreamFormat
-  bitrate:    number
-  sampleRate: number
-  channels:   number
-  mode:       EncoderMode
-  quality:    number
-  stereoMode: StereoMode
+  format:       StreamFormat
+  bitrate:      number
+  sampleRate:   number
+  channelLeft:  number
+  channelRight: number
+  mode:         EncoderMode
+  quality:      number
+  stereoMode:   StereoMode
 }
 
 export interface StreamConfig {
-  deviceId: string
-  sampleRate: number
-  channels: number
-  format: StreamFormat
-  bitrate: number
-  server: ServerConfig
+  deviceId:     string
+  sampleRate:   number
+  channelLeft:  number
+  channelRight: number
+  format:       StreamFormat
+  bitrate:      number
+  server:       ServerConfig
 }
 
 export interface StreamStatus {
@@ -99,13 +101,14 @@ export const DEFAULT_SERVER: ServerConfig = {
   public: false,
 }
 export const DEFAULT_ENCODER: EncoderConfig = {
-  format:     'mp3',
-  bitrate:    192,
-  sampleRate: 44100,
-  channels:   2,
-  mode:       'cbr',
-  quality:    4,
-  stereoMode: 'auto',
+  format:       'mp3',
+  bitrate:      192,
+  sampleRate:   44100,
+  channelLeft:  1,
+  channelRight: 2,
+  mode:         'cbr',
+  quality:      4,
+  stereoMode:   'auto',
 }
 
 export interface ServerEntry {

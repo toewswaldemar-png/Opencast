@@ -30,10 +30,11 @@ type Device struct {
 }
 
 type CaptureConfig struct {
-	DeviceID   string
-	SampleRate uint32
-	Channels   uint16
-	BitDepth   uint16
+	DeviceID     string
+	SampleRate   uint32
+	ChannelLeft  uint16 // 1-based input channel for L (0 = use default: 1)
+	ChannelRight uint16 // 1-based input channel for R (0 = use default: 2)
+	BitDepth     uint16
 }
 
 type LevelUpdate struct {

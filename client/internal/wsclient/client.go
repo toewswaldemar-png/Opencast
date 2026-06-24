@@ -27,13 +27,14 @@ type Cmd struct {
 
 // CmdStartPayload tells the client to start a stream.
 type CmdStartPayload struct {
-	StreamID   string `json:"streamId"`
-	DeviceID   string `json:"deviceId"`
-	IngestURL  string `json:"ingestUrl"`
-	Format     string `json:"format"`
-	Bitrate    int    `json:"bitrate"`
-	SampleRate uint32 `json:"sampleRate"`
-	Channels   uint16 `json:"channels"`
+	StreamID     string `json:"streamId"`
+	DeviceID     string `json:"deviceId"`
+	IngestURL    string `json:"ingestUrl"`
+	Format       string `json:"format"`
+	Bitrate      int    `json:"bitrate"`
+	SampleRate   uint32 `json:"sampleRate"`
+	ChannelLeft  uint16 `json:"channelLeft"`
+	ChannelRight uint16 `json:"channelRight"`
 }
 
 // CmdStopPayload tells the client to stop a stream.
@@ -43,10 +44,11 @@ type CmdStopPayload struct {
 
 // CmdMonitorPayload for monitor start/stop.
 type CmdMonitorPayload struct {
-	MonitorID  string `json:"monitorId"`  // card entry ID — used to route level updates back
-	DeviceID   string `json:"deviceId"`
-	SampleRate uint32 `json:"sampleRate"`
-	Channels   uint16 `json:"channels"`
+	MonitorID    string `json:"monitorId"`  // card entry ID — used to route level updates back
+	DeviceID     string `json:"deviceId"`
+	SampleRate   uint32 `json:"sampleRate"`
+	ChannelLeft  uint16 `json:"channelLeft"`
+	ChannelRight uint16 `json:"channelRight"`
 }
 
 // Handlers are the callbacks invoked when the server sends commands.
@@ -196,6 +198,12 @@ func (c *Client) sendDevices() {
 		devs = []audio.Device{}
 	}
 	c.Send("devices", devs)
+}
+
+// SendDevices re-enumerates audio devices and pushes the updated list to the server.
+// Call this after an ASIO control panel is closed so changed channel counts are reflected.
+func (c *Client) SendDevices() {
+	c.sendDevices()
 }
 
 // SendLevel sends a VU level update to the server.

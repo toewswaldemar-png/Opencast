@@ -215,30 +215,44 @@ function AudioTab({
         )}
       </Field>
 
+      <Field label="Samplerate">
+        <Select value={String(encoderConfig.sampleRate)}
+          onValueChange={(v) => onEncoderChange({ sampleRate: Number(v) as typeof SAMPLE_RATES[number] })}
+          disabled={disabled}>
+          <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {SAMPLE_RATES.map((r) => (
+              <SelectItem key={r} value={String(r)} className="text-xs">
+                {(r / 1000).toFixed(r % 1000 === 0 ? 0 : 1)} kHz
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Samplerate">
-          <Select value={String(encoderConfig.sampleRate)}
-            onValueChange={(v) => onEncoderChange({ sampleRate: Number(v) as typeof SAMPLE_RATES[number] })}
+        <Field label="Links">
+          <Select value={String(encoderConfig.channelLeft)}
+            onValueChange={(v) => onEncoderChange({ channelLeft: Number(v) })}
             disabled={disabled}>
             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {SAMPLE_RATES.map((r) => (
-                <SelectItem key={r} value={String(r)} className="text-xs">
-                  {(r / 1000).toFixed(r % 1000 === 0 ? 0 : 1)} kHz
+              {Array.from({ length: Math.max(2, selected?.maxInputChannels ?? 2) }, (_, i) => i + 1).map((n) => (
+                <SelectItem key={n} value={String(n)} className="text-xs font-mono">
+                  {n}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </Field>
-        <Field label="Kanäle">
-          <Select value={String(encoderConfig.channels)}
-            onValueChange={(v) => onEncoderChange({ channels: Number(v) })}
+        <Field label="Rechts">
+          <Select value={String(encoderConfig.channelRight)}
+            onValueChange={(v) => onEncoderChange({ channelRight: Number(v) })}
             disabled={disabled}>
             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
             <SelectContent>
-              {Array.from({ length: Math.max(1, selected?.maxInputChannels ?? 2) }, (_, i) => i + 1).map((n) => (
-                <SelectItem key={n} value={String(n)} className="text-xs">
-                  {n === 1 ? 'Mono' : n === 2 ? 'Stereo' : `${n} Kanäle`}
+              {Array.from({ length: Math.max(2, selected?.maxInputChannels ?? 2) }, (_, i) => i + 1).map((n) => (
+                <SelectItem key={n} value={String(n)} className="text-xs font-mono">
+                  {n}
                 </SelectItem>
               ))}
             </SelectContent>

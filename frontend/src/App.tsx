@@ -75,8 +75,8 @@ export default function App() {
           // Migrate entries that predate per-stream settings
           setServers(cfg.servers.map((s: ServerEntry & Record<string, unknown>) => ({
             ...s,
-            deviceId:      s.deviceId      || globalDevice,
-            encoderConfig: s.encoderConfig || globalEncoder,
+            deviceId:      s.deviceId || globalDevice,
+            encoderConfig: { ...DEFAULT_ENCODER, ...(s.encoderConfig || globalEncoder) },
           })))
         } else if (cfg.server) {
           const e = makeServerEntry('Hauptstream', globalDevice, globalEncoder)
@@ -185,16 +185,17 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          monitorId:  entry.id,
-          deviceId:   device,
-          sampleRate: entry.encoderConfig.sampleRate,
-          channels:   entry.encoderConfig.channels,
+          monitorId:    entry.id,
+          deviceId:     device,
+          sampleRate:   entry.encoderConfig.sampleRate,
+          channelLeft:  entry.encoderConfig.channelLeft,
+          channelRight: entry.encoderConfig.channelRight,
         }),
       }).catch(() => {})
     }
   }, [ // eslint-disable-line
     clientConnected, monitorEnabled, selectedDevice,
-    servers.map(s => `${s.id}:${s.deviceId}:${s.encoderConfig.sampleRate}:${s.encoderConfig.channels}`).join(','),
+    servers.map(s => `${s.id}:${s.deviceId}:${s.encoderConfig.sampleRate}:${s.encoderConfig.channelLeft}:${s.encoderConfig.channelRight}`).join(','),
     Object.keys(allStatuses).join(','),
   ])
 
@@ -220,13 +221,14 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          streamId:   serverId,
+          streamId:     serverId,
           deviceId,
-          sampleRate: enc.sampleRate,
-          channels:   enc.channels,
-          format:     enc.format,
-          bitrate:    enc.bitrate,
-          server:     entry.config,
+          sampleRate:   enc.sampleRate,
+          channelLeft:  enc.channelLeft,
+          channelRight: enc.channelRight,
+          format:       enc.format,
+          bitrate:      enc.bitrate,
+          server:       entry.config,
         }),
       })
       if (!res.ok) {

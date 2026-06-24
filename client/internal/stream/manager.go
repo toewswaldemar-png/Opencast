@@ -16,13 +16,14 @@ import (
 
 // Config is the streaming configuration for one session.
 type Config struct {
-	StreamID   string
-	DeviceID   string
-	IngestURL  string
-	Format     audio.Format
-	Bitrate    int
-	SampleRate uint32
-	Channels   uint16
+	StreamID     string
+	DeviceID     string
+	IngestURL    string
+	Format       audio.Format
+	Bitrate      int
+	SampleRate   uint32
+	ChannelLeft  uint16
+	ChannelRight uint16
 }
 
 // StatusCallback is called on stream status changes.
@@ -78,10 +79,11 @@ func (m *Manager) Start(cfg Config) error {
 	m.mu.Unlock()
 
 	cap := audio.NewCapturer(audio.CaptureConfig{
-		DeviceID:   cfg.DeviceID,
-		SampleRate: cfg.SampleRate,
-		Channels:   cfg.Channels,
-		BitDepth:   16,
+		DeviceID:    cfg.DeviceID,
+		SampleRate:  cfg.SampleRate,
+		ChannelLeft:  cfg.ChannelLeft,
+		ChannelRight: cfg.ChannelRight,
+		BitDepth:    16,
 	})
 
 	log.Printf("[stream/%s] Capturer wird gestartet…", cfg.StreamID)
@@ -98,9 +100,9 @@ func (m *Manager) Start(cfg Config) error {
 		Format:          cfg.Format,
 		Bitrate:         cfg.Bitrate,
 		SampleRate:      cfg.SampleRate,
-		Channels:        cfg.Channels,
+		Channels:        2,
 		InputSampleRate: actual.SampleRate,
-		InputChannels:   actual.Channels,
+		InputChannels:   2,
 	})
 	if err != nil {
 		cancel()

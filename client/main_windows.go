@@ -155,12 +155,13 @@ func onReady() {
 				}
 				monitorsMu.Unlock()
 
-				log.Printf("[monitor/%s] cmd:monitor:start — device=%s sr=%d ch=%d",
-					p.MonitorID, p.DeviceID, p.SampleRate, p.Channels)
+				log.Printf("[monitor/%s] cmd:monitor:start — device=%s sr=%d L=%d R=%d",
+					p.MonitorID, p.DeviceID, p.SampleRate, p.ChannelLeft, p.ChannelRight)
 				if err := mon.Start(stream.MonitorConfig{
-					DeviceID:   p.DeviceID,
-					SampleRate: p.SampleRate,
-					Channels:   p.Channels,
+					DeviceID:    p.DeviceID,
+					SampleRate:  p.SampleRate,
+					ChannelLeft:  p.ChannelLeft,
+					ChannelRight: p.ChannelRight,
 				}); err != nil {
 					log.Printf("[monitor/%s] Start fehlgeschlagen (device=%s): %v", p.MonitorID, p.DeviceID, err)
 					if ws != nil {
@@ -175,8 +176,34 @@ func onReady() {
 			stopAllMonitors()
 		},
 		OnAsioPanel: func(deviceID string) {
-			clsid := strings.TrimPrefix(deviceID, "asio:")
-			audio.OpenASIOControlPanel(clsid)
+			go func() {
+				clsid := strings.TrimPrefix(deviceID, "asio:")
+				audio.OpenASIOControlPanelSync(clsid)
+
+				// Stop the device monitor so asioGlobalMu is released and the probe
+				// can get the updated channel count from the driver.
+				monitorsMu.Lock()
+				mon := deviceMonitor[deviceID]
+				monitorsMu.Unlock()
+
+				var restartCfg stream.MonitorConfig
+				if mon != nil {
+					restartCfg = mon.LastConfig()
+					mon.Stop()
+				}
+
+				// Fresh probe: asioGlobalMu is now free.
+				if ws != nil {
+					ws.SendDevices()
+				}
+
+				// Restart the monitor with the same config.
+				if mon != nil && restartCfg.DeviceID != "" {
+					if err := mon.Start(restartCfg); err != nil {
+						log.Printf("[asio] Monitor-Neustart nach Panel fehlgeschlagen: %v", err)
+					}
+				}
+			}()
 		},
 	})
 
@@ -272,8 +299,8 @@ func stopAllMonitors() {
 }
 
 func handleStart(p wsclient.CmdStartPayload) {
-	log.Printf("[stream/%s] cmd:start empfangen — device=%s format=%s br=%d sr=%d ch=%d",
-		p.StreamID, p.DeviceID, p.Format, p.Bitrate, p.SampleRate, p.Channels)
+	log.Printf("[stream/%s] cmd:start empfangen — device=%s format=%s br=%d sr=%d L=%d R=%d",
+		p.StreamID, p.DeviceID, p.Format, p.Bitrate, p.SampleRate, p.ChannelLeft, p.ChannelRight)
 
 	// ASIO is exclusive per driver instance.  Opening a second capturer for the same
 	// device while another stream already holds it crashes the ASIO driver in CGo.
@@ -313,13 +340,14 @@ func handleStart(p wsclient.CmdStartPayload) {
 	}
 
 	err := manager.Start(stream.Config{
-		StreamID:   p.StreamID,
-		DeviceID:   p.DeviceID,
-		IngestURL:  ingestURL,
-		Format:     format,
-		Bitrate:    p.Bitrate,
-		SampleRate: p.SampleRate,
-		Channels:   p.Channels,
+		StreamID:    p.StreamID,
+		DeviceID:    p.DeviceID,
+		IngestURL:   ingestURL,
+		Format:      format,
+		Bitrate:     p.Bitrate,
+		SampleRate:  p.SampleRate,
+		ChannelLeft:  p.ChannelLeft,
+		ChannelRight: p.ChannelRight,
 	})
 	if err != nil {
 		log.Printf("[stream/%s] Start fehlgeschlagen: %v", p.StreamID, err)

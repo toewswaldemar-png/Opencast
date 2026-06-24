@@ -48,13 +48,14 @@ func (s *Server) HandleStatus(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/stream/start
 type StartRequest struct {
-	StreamID   string              `json:"streamId"`
-	DeviceID   string              `json:"deviceId"`
-	SampleRate uint32              `json:"sampleRate"`
-	Channels   uint16              `json:"channels"`
-	Format     string              `json:"format"`
-	Bitrate    int                 `json:"bitrate"`
-	Server     config.ServerConfig `json:"server"`
+	StreamID     string              `json:"streamId"`
+	DeviceID     string              `json:"deviceId"`
+	SampleRate   uint32              `json:"sampleRate"`
+	ChannelLeft  uint16              `json:"channelLeft"`
+	ChannelRight uint16              `json:"channelRight"`
+	Format       string              `json:"format"`
+	Bitrate      int                 `json:"bitrate"`
+	Server       config.ServerConfig `json:"server"`
 }
 
 func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
@@ -79,8 +80,11 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 	if req.SampleRate == 0 {
 		req.SampleRate = 44100
 	}
-	if req.Channels == 0 {
-		req.Channels = 2
+	if req.ChannelLeft == 0 {
+		req.ChannelLeft = 1
+	}
+	if req.ChannelRight == 0 {
+		req.ChannelRight = 2
 	}
 	if req.Bitrate == 0 {
 		req.Bitrate = 192
@@ -119,13 +123,14 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 	sent := s.clientHub.Send(ClientCmd{
 		Type: "cmd:start",
 		Payload: CmdStartPayload{
-			StreamID:   req.StreamID,
-			DeviceID:   req.DeviceID,
-			IngestURL:  ingestURL,
-			Format:     req.Format,
-			Bitrate:    req.Bitrate,
-			SampleRate: req.SampleRate,
-			Channels:   req.Channels,
+			StreamID:     req.StreamID,
+			DeviceID:     req.DeviceID,
+			IngestURL:    ingestURL,
+			Format:       req.Format,
+			Bitrate:      req.Bitrate,
+			SampleRate:   req.SampleRate,
+			ChannelLeft:  req.ChannelLeft,
+			ChannelRight: req.ChannelRight,
 		},
 	})
 	if !sent {

@@ -31,13 +31,14 @@ type ServerConfig struct {
 }
 
 type EncoderConfig struct {
-	Format     string `json:"format,omitempty"`
-	Bitrate    int    `json:"bitrate,omitempty"`
-	SampleRate int    `json:"sampleRate,omitempty"`
-	Channels   int    `json:"channels,omitempty"`
-	Mode       string `json:"mode,omitempty"`
-	Quality    int    `json:"quality,omitempty"`
-	StereoMode string `json:"stereoMode,omitempty"`
+	Format       string `json:"format,omitempty"`
+	Bitrate      int    `json:"bitrate,omitempty"`
+	SampleRate   int    `json:"sampleRate,omitempty"`
+	ChannelLeft  int    `json:"channelLeft,omitempty"`
+	ChannelRight int    `json:"channelRight,omitempty"`
+	Mode         string `json:"mode,omitempty"`
+	Quality      int    `json:"quality,omitempty"`
+	StereoMode   string `json:"stereoMode,omitempty"`
 }
 
 type Config struct {

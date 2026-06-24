@@ -6,15 +6,17 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"client/internal/audio"
 )
 
 type MonitorConfig struct {
-	DeviceID   string `json:"deviceId"`
-	SampleRate uint32 `json:"sampleRate"`
-	Channels   uint16 `json:"channels"`
+	DeviceID     string `json:"deviceId"`
+	SampleRate   uint32 `json:"sampleRate"`
+	ChannelLeft  uint16 `json:"channelLeft"`
+	ChannelRight uint16 `json:"channelRight"`
 }
 
 type Monitor struct {
@@ -30,6 +32,13 @@ type Monitor struct {
 
 func NewMonitor() *Monitor { return &Monitor{} }
 
+// LastConfig returns the configuration the monitor is currently running with.
+func (m *Monitor) LastConfig() MonitorConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastCfg
+}
+
 func (m *Monitor) SetLevelCallback(cb func(audio.LevelUpdate)) {
 	m.mu.Lock()
 	m.levelCb = cb
@@ -40,26 +49,32 @@ func (m *Monitor) Start(cfg MonitorConfig) error {
 	m.opMu.Lock()
 	defer m.opMu.Unlock()
 
-	if cfg.SampleRate == 0 { cfg.SampleRate = 44100 }
-	if cfg.Channels == 0   { cfg.Channels = 2 }
+	if cfg.SampleRate == 0    { cfg.SampleRate = 44100 }
+	if cfg.ChannelLeft == 0  { cfg.ChannelLeft = 1 }
+	if cfg.ChannelRight == 0 { cfg.ChannelRight = 2 }
 
 	m.mu.Lock()
 	if m.running && m.lastCfg == cfg {
 		m.mu.Unlock()
 		return nil
 	}
+	// ASIO uses an exclusive global mutex (asioGlobalMu). Starting a new capturer
+	// while the old one holds that lock would deadlock forever in Start().
+	// Stop the old capturer first so the lock is free before newCap.Start() runs.
+	if m.running && strings.HasPrefix(cfg.DeviceID, "asio:") {
+		m.stopLocked() // releases and re-acquires m.mu
+	}
 	m.mu.Unlock()
 
 	// Open the new capturer without holding m.mu (avoids deadlock with run()).
-	// opMu ensures a concurrent Stop() blocks here and only runs after we return,
-	// so the device is guaranteed free before manager.Start() opens it.
-	// If the new device fails (e.g. ASIO exclusive conflict), we return early and
-	// the old monitor keeps running — VU stays live instead of going dark.
+	// opMu ensures a concurrent Stop() blocks here and only runs after we return.
+	// For non-ASIO devices: if the new capturer fails, the old one keeps running.
 	newCap := audio.NewCapturer(audio.CaptureConfig{
-		DeviceID:   cfg.DeviceID,
-		SampleRate: cfg.SampleRate,
-		Channels:   cfg.Channels,
-		BitDepth:   16,
+		DeviceID:    cfg.DeviceID,
+		SampleRate:  cfg.SampleRate,
+		ChannelLeft:  cfg.ChannelLeft,
+		ChannelRight: cfg.ChannelRight,
+		BitDepth:    16,
 	})
 	newCtx, newCancel := context.WithCancel(context.Background())
 	if err := newCap.Start(newCtx); err != nil {
@@ -67,7 +82,7 @@ func (m *Monitor) Start(cfg MonitorConfig) error {
 		return fmt.Errorf("monitor: %w", err)
 	}
 
-	log.Printf("[monitor] Capturer gestartet: device=%s sr=%d ch=%d", cfg.DeviceID, cfg.SampleRate, cfg.Channels)
+	log.Printf("[monitor] Capturer gestartet: device=%s sr=%d L=%d R=%d", cfg.DeviceID, cfg.SampleRate, cfg.ChannelLeft, cfg.ChannelRight)
 
 	// New capturer is up — stop the old one and install the new.
 	m.mu.Lock()

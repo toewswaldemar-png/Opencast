@@ -350,10 +350,63 @@ cleanup:
 
 int asio_probe_driver(const char *clsidStr, long *numInputCh, double *sampleRate) {
     if (g_asio) { *numInputCh = 0; *sampleRate = 0; return -1; }
-    char errBuf[256];
-    if (asio_open_driver(clsidStr, errBuf, sizeof(errBuf)) != 0) return -1;
-    int ret = asio_get_driver_info(numInputCh, sampleRate, errBuf, sizeof(errBuf));
-    asio_release_driver();
+
+    CLSID clsid; wchar_t wclsid[64];
+    if (MultiByteToWideChar(CP_ACP, 0, clsidStr, -1, wclsid, 64) == 0) return -2;
+    if (CLSIDFromString(wclsid, &clsid) != S_OK) return -3;
+
+    // CoInitializeEx is required before CoCreateInstance.
+    // S_OK = freshly initialized, S_FALSE = already initialized on this thread
+    // (both add a reference and need CoUninitialize).
+    // RPC_E_CHANGED_MODE = thread has a different apartment type — proceed anyway.
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool didCoInit = SUCCEEDED(hr);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return -4;
+
+    IASIO *asio = nullptr;
+    hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER,
+                          clsid, reinterpret_cast<void **>(&asio));
+    if (FAILED(hr)) { if (didCoInit) CoUninitialize(); return -5; }
+
+    // Ensure this thread has a message queue (required for STA COM apartments).
+    { MSG _msg; PeekMessageA(&_msg, nullptr, 0, 0, PM_NOREMOVE); }
+
+    // Try nullptr first (PortAudio/butt style).
+    bool initOk = asio->init(nullptr);
+    HWND probeWnd = nullptr;
+    if (!initOk) {
+        // Some hardware ASIO drivers (e.g. Yamaha Steinberg) need a real HWND.
+        // Create a temporary child-of-desktop window and retry.
+        probeWnd = CreateWindowExA(0, "STATIC", nullptr, WS_CHILD,
+                                   0, 0, 1, 1, GetDesktopWindow(),
+                                   nullptr, GetModuleHandleA(nullptr), nullptr);
+        if (probeWnd) {
+            initOk = asio->init((void *)probeWnd);
+        }
+    }
+
+    int ret = -6;
+    if (initOk) {
+        // Pump any deferred-init messages the driver may have posted.
+        MSG msg;
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        long numOut = 0;
+        if (asio->getChannels(numInputCh, &numOut) == ASE_OK) {
+            ASIOSampleRate sr = 48000.0;
+            asio->getSampleRate(&sr);
+            *sampleRate = (double)sr;
+            ret = 0;
+        } else {
+            ret = -7;
+        }
+    }
+
+    if (probeWnd) DestroyWindow(probeWnd);
+    asio->Release();
+    if (didCoInit) CoUninitialize();
     return ret;
 }
 
@@ -496,4 +549,17 @@ void asio_open_control_panel(const char *clsidStr) {
     pa->clsid[sizeof(pa->clsid) - 1] = '\0';
     HANDLE h = CreateThread(nullptr, 0, panel_thread_func, pa, 0, nullptr);
     if (h) CloseHandle(h);
+}
+
+void asio_open_control_panel_sync(const char *clsidStr) {
+    PanelArg *pa = (PanelArg *)malloc(sizeof(PanelArg));
+    if (!pa) return;
+    strncpy(pa->clsid, clsidStr, sizeof(pa->clsid) - 1);
+    pa->clsid[sizeof(pa->clsid) - 1] = '\0';
+    HANDLE h = CreateThread(nullptr, 0, panel_thread_func, pa, 0, nullptr);
+    if (h) {
+        // Block until the panel thread exits (user closed the panel window).
+        WaitForSingleObject(h, 120000); // 2-min safety timeout
+        CloseHandle(h);
+    }
 }

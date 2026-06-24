@@ -18,13 +18,14 @@ type ClientCmd struct {
 
 // CmdStartPayload tells the client to start a stream.
 type CmdStartPayload struct {
-	StreamID   string `json:"streamId"`
-	DeviceID   string `json:"deviceId"`
-	IngestURL  string `json:"ingestUrl"`  // e.g. http://server:8765/ingest/{streamId}
-	Format     string `json:"format"`
-	Bitrate    int    `json:"bitrate"`
-	SampleRate uint32 `json:"sampleRate"`
-	Channels   uint16 `json:"channels"`
+	StreamID     string `json:"streamId"`
+	DeviceID     string `json:"deviceId"`
+	IngestURL    string `json:"ingestUrl"`  // e.g. http://server:8765/ingest/{streamId}
+	Format       string `json:"format"`
+	Bitrate      int    `json:"bitrate"`
+	SampleRate   uint32 `json:"sampleRate"`
+	ChannelLeft  uint16 `json:"channelLeft"`
+	ChannelRight uint16 `json:"channelRight"`
 }
 
 // CmdStopPayload tells the client to stop a stream.
@@ -34,10 +35,11 @@ type CmdStopPayload struct {
 
 // CmdMonitorPayload tells the client to start/stop the VU monitor.
 type CmdMonitorPayload struct {
-	MonitorID  string `json:"monitorId"`  // card entry ID
-	DeviceID   string `json:"deviceId"`
-	SampleRate uint32 `json:"sampleRate"`
-	Channels   uint16 `json:"channels"`
+	MonitorID    string `json:"monitorId"`  // card entry ID
+	DeviceID     string `json:"deviceId"`
+	SampleRate   uint32 `json:"sampleRate"`
+	ChannelLeft  uint16 `json:"channelLeft"`
+	ChannelRight uint16 `json:"channelRight"`
 }
 
 // clientMsg is an incoming message from the Windows client.
