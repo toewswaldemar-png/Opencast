@@ -357,6 +357,11 @@ cleanup:
 int asio_probe_driver(const char *clsidStr, long *numInputCh, double *sampleRate) {
     if (g_asio) { *numInputCh = 0; *sampleRate = 0; return -1; }
 
+    // Bump the Winsock reference count before loading the ASIO driver via COM.
+    // Some drivers call WSACleanup() in their DLL_PROCESS_DETACH teardown;
+    // without this the reference count can reach 0 and kill the network stack.
+    { WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa); }
+
     CLSID clsid; wchar_t wclsid[64];
     if (MultiByteToWideChar(CP_ACP, 0, clsidStr, -1, wclsid, 64) == 0) return -2;
     if (CLSIDFromString(wclsid, &clsid) != S_OK) return -3;
