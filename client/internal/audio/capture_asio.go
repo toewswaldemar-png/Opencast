@@ -95,6 +95,7 @@ type ASIOCapturer struct {
 	doneCh         chan struct{}
 	callbackOnce   sync.Once
 	callbackFired  atomic.Bool
+	lastLevelAt    time.Time // throttle VU updates to ~30 Hz
 }
 
 // NewCapturer dispatches to ASIOCapturer for "asio:" devices, WasapiCapturer otherwise.
@@ -278,6 +279,11 @@ func (c *ASIOCapturer) sendLevels(pcm []byte) {
 	if len(pcm) < 2 {
 		return
 	}
+	now := time.Now()
+	if now.Sub(c.lastLevelAt) < 33*time.Millisecond {
+		return // throttle to ~30 Hz
+	}
+	c.lastLevelAt = now
 	ch := c.actualChannels
 	if ch < 1 {
 		ch = 1

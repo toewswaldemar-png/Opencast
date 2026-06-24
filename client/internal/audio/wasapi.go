@@ -37,10 +37,11 @@ type WasapiCapturer struct {
 	isFloat  bool
 	srcBPS   uint32
 
-	pcmOut chan []byte
-	levels chan LevelUpdate
-	stopCh chan struct{}
-	doneCh chan struct{}
+	pcmOut      chan []byte
+	levels      chan LevelUpdate
+	stopCh      chan struct{}
+	doneCh      chan struct{}
+	lastLevelAt time.Time // throttle VU updates to ~30 Hz
 }
 
 func (c *WasapiCapturer) OutputCh() <-chan []byte     { return c.pcmOut }
@@ -357,6 +358,11 @@ func (c *WasapiCapturer) sendLevels(pcm []byte) {
 	if len(pcm) < 4 {
 		return
 	}
+	now := time.Now()
+	if now.Sub(c.lastLevelAt) < 33*time.Millisecond {
+		return // throttle to ~30 Hz
+	}
+	c.lastLevelAt = now
 	var peakL, peakR float64
 	for i := 0; i+3 < len(pcm); i += 4 {
 		sL := math.Abs(float64(int16(uint16(pcm[i])|uint16(pcm[i+1])<<8)) / 32768.0)
