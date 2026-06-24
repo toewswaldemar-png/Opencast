@@ -4,7 +4,7 @@ package audio
 
 /*
 #cgo CXXFLAGS: -I../../../ASIOSDK/common
-#cgo LDFLAGS: -lole32 -loleaut32 -ladvapi32 -lstdc++
+#cgo LDFLAGS: -lole32 -loleaut32 -ladvapi32 -lws2_32 -lstdc++
 #include "asio_host.h"
 #include <stdlib.h>
 */

@@ -1,5 +1,6 @@
 //go:build windows && asio
 
+#include <winsock2.h>
 #include <windows.h>
 #include "iasiodrv.h"
 
@@ -162,6 +163,11 @@ int asio_enumerate_drivers(ASIORegEntry *drivers, int maxDrivers) {
 
 int asio_open_driver(const char *clsidStr, char *errBuf, int errLen) {
     if (g_asio) asio_release_driver();
+
+    // Some ASIO drivers call WSACleanup() in their COM/DLL teardown, which
+    // drops the Winsock reference count to 0 and breaks all network calls.
+    // Bumping the count here ensures it never reaches 0 after driver unload.
+    { WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa); }
 
     CLSID clsid; wchar_t wclsid[64];
     if (MultiByteToWideChar(CP_ACP, 0, clsidStr, -1, wclsid, 64) == 0) {
