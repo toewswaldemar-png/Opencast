@@ -24,10 +24,11 @@ import (
 
 )
 
-var (
-	globalASIOCapturerMu sync.Mutex
-	globalASIOCapturer   *ASIOCapturer
+// globalASIOCapturer is written in Start()/Stop() and read from the C ASIO
+// callback thread; must use atomic access to avoid a race with the mutex.
+var globalASIOCapturer atomic.Pointer[ASIOCapturer]
 
+var (
 	// asioGlobalMu serializes all ASIO driver opens — only one at a time.
 	// asio_open_driver writes the global g_asio; a concurrent second open
 	// would free the first's driver while it is still in asio_run_message_pump.
@@ -54,9 +55,7 @@ var (
 
 //export goAsioBufferCallback
 func goAsioBufferCallback(data unsafe.Pointer, numFrames C.int, _ C.int, numChannels C.int) {
-	globalASIOCapturerMu.Lock()
-	capturer := globalASIOCapturer
-	globalASIOCapturerMu.Unlock()
+	capturer := globalASIOCapturer.Load()
 	if capturer == nil {
 		return
 	}
@@ -64,26 +63,46 @@ func goAsioBufferCallback(data unsafe.Pointer, numFrames C.int, _ C.int, numChan
 	capturer.callbackOnce.Do(func() {
 		log.Printf("[asio] Erster Callback: frames=%d ch=%d", int(numFrames), int(numChannels))
 	})
-	nCh := int(numChannels)
-	srcBytes := int(numFrames) * nCh * 2
-	src := make([]byte, srcBytes)
-	copy(src, unsafe.Slice((*byte)(data), srcBytes))
 
-	var buf []byte
-	if nCh == 1 {
-		// L == R: one ASIO channel opened — expand to stereo so the rest of the
-		// pipeline always sees 2-channel interleaved PCM.
-		buf = make([]byte, int(numFrames)*4)
-		for i := range int(numFrames) {
-			buf[i*4+0] = src[i*2+0]
-			buf[i*4+1] = src[i*2+1]
-			buf[i*4+2] = src[i*2+0]
-			buf[i*4+3] = src[i*2+1]
-		}
-	} else {
-		buf = src
+	nCh := int(numChannels)
+	frames := int(numFrames)
+
+	// Fast path: skip allocation when nobody is reading PCM and level is not due.
+	// In monitor mode pcmOut fills after ~32 callbacks (≈43 ms) and stays full
+	// because monitor.go's run() no longer drains it. At 30 Hz throttle vs the
+	// driver's callback rate this returns immediately ~95% of the time.
+	now := time.Now()
+	levelDue := now.Sub(capturer.lastLevelAt) >= 33*time.Millisecond
+	hasPCMSpace := len(capturer.pcmOut) < cap(capturer.pcmOut)
+	if !levelDue && !hasPCMSpace {
+		return
 	}
-	capturer.sendPCM(buf)
+
+	if hasPCMSpace {
+		// Streaming or buffer not yet full: allocate a copy for the downstream consumer.
+		srcBytes := frames * nCh * 2
+		var buf []byte
+		if nCh == 1 {
+			// L == R: one ASIO channel opened — expand to stereo so the rest of the
+			// pipeline always sees 2-channel interleaved PCM.
+			buf = make([]byte, frames*4)
+			src := unsafe.Slice((*byte)(data), srcBytes)
+			for i := range frames {
+				buf[i*4+0] = src[i*2+0]
+				buf[i*4+1] = src[i*2+1]
+				buf[i*4+2] = src[i*2+0]
+				buf[i*4+3] = src[i*2+1]
+			}
+		} else {
+			buf = make([]byte, srcBytes)
+			copy(buf, unsafe.Slice((*byte)(data), srcBytes))
+		}
+		capturer.sendPCM(buf)
+	} else {
+		// Monitor-only mode: pcmOut is full, no consumer active.
+		// Compute VU level directly from the C buffer — zero Go allocation.
+		capturer.computeLevelFromC(data, frames, nCh, now)
+	}
 }
 
 type ASIOCapturer struct {
@@ -204,16 +223,12 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 			channels = []C.int{C.int(chLIdx), C.int(chRIdx)}
 		}
 
-		globalASIOCapturerMu.Lock()
-		globalASIOCapturer = c
-		globalASIOCapturerMu.Unlock()
+		globalASIOCapturer.Store(c)
 
 		sr := C.double(c.cfg.SampleRate)
 		t2 := time.Now()
 		if C.asio_start_capture(&channels[0], C.int(len(channels)), prefBuf, sr, &errBuf[0], 256) != 0 {
-			globalASIOCapturerMu.Lock()
-			globalASIOCapturer = nil
-			globalASIOCapturerMu.Unlock()
+			globalASIOCapturer.Store(nil)
 			errCh <- fmt.Errorf("ASIO-Aufnahme konnte nicht gestartet werden: %s", C.GoString(&errBuf[0]))
 			return
 		}
@@ -250,9 +265,7 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 
 		C.asio_run_message_pump()
 
-		globalASIOCapturerMu.Lock()
-		globalASIOCapturer = nil
-		globalASIOCapturerMu.Unlock()
+		globalASIOCapturer.Store(nil)
 	}()
 
 	return <-errCh
@@ -295,6 +308,40 @@ func (c *ASIOCapturer) sendLevels(pcm []byte) {
 			peakL = sL
 		}
 		if ch >= 2 && i+3 < len(pcm) {
+			sR := math.Abs(float64(int16(uint16(pcm[i+2])|uint16(pcm[i+3])<<8)) / 32768.0)
+			if sR > peakR {
+				peakR = sR
+			}
+		} else {
+			peakR = peakL
+		}
+	}
+	toDBFS := func(v float64) float64 {
+		if v < 0.000001 {
+			return -120
+		}
+		return math.Max(-120, 20*math.Log10(v))
+	}
+	select {
+	case c.levels <- LevelUpdate{Left: toDBFS(peakL), Right: toDBFS(peakR)}:
+	default:
+	}
+}
+
+// computeLevelFromC computes the VU level from the raw C callback buffer without
+// allocating a Go slice copy. data points to C's g_pcmBuf (int16_t interleaved).
+// Only called in monitor mode when pcmOut has no active consumer.
+func (c *ASIOCapturer) computeLevelFromC(data unsafe.Pointer, frames, nCh int, now time.Time) {
+	c.lastLevelAt = now
+	pcm := unsafe.Slice((*byte)(data), frames*nCh*2)
+	var peakL, peakR float64
+	stride := nCh * 2
+	for i := 0; i+1 < len(pcm); i += stride {
+		sL := math.Abs(float64(int16(uint16(pcm[i])|uint16(pcm[i+1])<<8)) / 32768.0)
+		if sL > peakL {
+			peakL = sL
+		}
+		if nCh >= 2 && i+3 < len(pcm) {
 			sR := math.Abs(float64(int16(uint16(pcm[i+2])|uint16(pcm[i+3])<<8)) / 32768.0)
 			if sR > peakR {
 				peakR = sR

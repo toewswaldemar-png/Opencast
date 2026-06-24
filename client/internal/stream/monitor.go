@@ -113,8 +113,6 @@ func (m *Monitor) run(ctx context.Context, cap audio.Capturer, done chan struct{
 			cb := m.levelCb
 			m.mu.Unlock()
 			if cb != nil { cb(lvl) }
-		case _, ok := <-cap.OutputCh():
-			if !ok { return }
 		}
 	}
 }
