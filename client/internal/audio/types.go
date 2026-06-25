@@ -38,6 +38,9 @@ type CaptureConfig struct {
 	// Channels overrides ChannelLeft/Right for ASIO: explicit 0-based channel list.
 	// Used by multi-subscriber fan-out to open all needed channels in one session.
 	Channels []int
+	// NativeChannels is set by the capturer after Start() and reflects how many
+	// interleaved channels the raw PCM buffer actually contains.
+	NativeChannels int
 }
 
 type LevelUpdate struct {
@@ -48,6 +51,10 @@ type LevelUpdate struct {
 type Capturer interface {
 	Start(ctx context.Context) error
 	Stop()
+	// Done is closed when the capturer stops — either intentionally (after Stop/ctx)
+	// or unexpectedly (driver crash, device removed). Callers can watch this to
+	// detect unexpected exits and trigger recovery.
+	Done() <-chan struct{}
 	OutputCh() <-chan []byte
 	LevelCh() <-chan LevelUpdate
 	ActualConfig() CaptureConfig
@@ -61,4 +68,14 @@ type MultiLevelCapturer interface {
 	// with the full interleaved int16 PCM for all open channels.
 	// Called from the ASIO audio thread — must not block or retain pcm after return.
 	SetMultiLevelCallback(func(frames int, pcm []int16))
+}
+
+// PCMFanOutCapturer extends Capturer with a byte-level PCM fan-out callback for
+// multi-subscriber streaming. Implemented by ASIOCapturer.
+type PCMFanOutCapturer interface {
+	Capturer
+	// SetPCMFanOutCallback installs a callback that receives every encoded PCM
+	// buffer (multi-channel interleaved int16 LE) instead of sending to OutputCh.
+	// Set to nil to revert to the normal single-consumer OutputCh path.
+	SetPCMFanOutCallback(func(pcm []byte))
 }

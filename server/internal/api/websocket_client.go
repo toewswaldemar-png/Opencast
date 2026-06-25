@@ -143,6 +143,7 @@ func (ch *ClientHub) handleClientMsg(msg clientMsg) {
 			ch.mu.Lock()
 			ch.devices = devs
 			ch.mu.Unlock()
+			log.Printf("[client] devices: %d Gerät(e) gemeldet", len(devs))
 			ch.hub.Broadcast(MsgDevices, devs)
 		}
 
@@ -159,6 +160,7 @@ func (ch *ClientHub) handleClientMsg(msg clientMsg) {
 				ch.mu.Lock()
 				ch.status[id] = payload
 				ch.mu.Unlock()
+				log.Printf("[client] stream:status id=%s running=%v connected=%v", id, payload["running"], payload["connected"])
 			}
 			ch.hub.Broadcast(MsgStatus, payload)
 		}
@@ -166,10 +168,11 @@ func (ch *ClientHub) handleClientMsg(msg clientMsg) {
 	case "stream:error":
 		var payload map[string]any
 		if err := json.Unmarshal(msg.Payload, &payload); err == nil {
-			// If the stream never started (still pending in relay), clean it up now
-			// so the user can retry immediately instead of waiting for the 30 s timeout.
-			if id, ok := payload["streamId"].(string); ok && ch.relay != nil {
-				ch.relay.Unregister(id)
+			if id, ok := payload["streamId"].(string); ok {
+				log.Printf("[client] stream:error id=%s message=%v", id, payload["message"])
+				if ch.relay != nil {
+					ch.relay.Unregister(id)
+				}
 			}
 			ch.hub.Broadcast(MsgError, payload)
 		}
@@ -191,8 +194,10 @@ func (ch *ClientHub) Send(cmd ClientCmd) bool {
 	}
 	select {
 	case c.send <- data:
+		log.Printf("[client] → %s", cmd.Type)
 		return true
 	default:
+		log.Printf("[client] → %s (send-buffer voll, verworfen)", cmd.Type)
 		return false
 	}
 }

@@ -55,9 +55,12 @@ type CmdMonitorPayload struct {
 type Handlers struct {
 	OnStart        func(CmdStartPayload)
 	OnStop         func(CmdStopPayload)
-	OnMonitorStart func(CmdMonitorPayload)
-	OnMonitorStop  func()
-	OnAsioPanel    func(deviceID string)
+	OnMonitorStart     func(CmdMonitorPayload)
+	OnMonitorStop      func()
+	OnMonitorStopCard  func(monitorID string)
+	OnAsioPanel        func(deviceID string)
+	OnConnected    func()
+	OnDisconnected func()
 }
 
 // Client manages a persistent WebSocket connection to the server.
@@ -105,6 +108,9 @@ func (c *Client) connect(ctx context.Context) error {
 	c.mu.Unlock()
 
 	log.Printf("[ws] Verbunden mit %s", c.serverURL)
+	if c.handlers.OnConnected != nil {
+		c.handlers.OnConnected()
+	}
 
 	// Send device list immediately on connect
 	c.sendDevices()
@@ -118,6 +124,9 @@ func (c *Client) connect(ctx context.Context) error {
 		c.mu.Unlock()
 		conn.Close()
 		log.Println("[ws] Verbindung getrennt")
+		if c.handlers.OnDisconnected != nil {
+			c.handlers.OnDisconnected()
+		}
 	}()
 
 	// Heartbeat: keep the server's 90s read deadline alive when the client is idle.
@@ -163,6 +172,7 @@ func (c *Client) connect(ctx context.Context) error {
 }
 
 func (c *Client) handleCmd(cmd Cmd) {
+	log.Printf("[ws] cmd: %s payload=%s", cmd.Type, string(cmd.Payload))
 	switch cmd.Type {
 	case "cmd:start":
 		var p CmdStartPayload
@@ -180,7 +190,13 @@ func (c *Client) handleCmd(cmd Cmd) {
 			c.handlers.OnMonitorStart(p)
 		}
 	case "cmd:monitor:stop":
-		if c.handlers.OnMonitorStop != nil {
+		var p struct {
+			MonitorID string `json:"monitorId"`
+		}
+		json.Unmarshal(cmd.Payload, &p) //nolint:errcheck
+		if p.MonitorID != "" && c.handlers.OnMonitorStopCard != nil {
+			c.handlers.OnMonitorStopCard(p.MonitorID)
+		} else if c.handlers.OnMonitorStop != nil {
 			c.handlers.OnMonitorStop()
 		}
 	case "cmd:asio:panel":

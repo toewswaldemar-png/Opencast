@@ -62,7 +62,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	c := &wsConn{conn: conn, send: make(chan []byte, 64), closed: make(chan struct{})}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
+	n := len(h.clients)
 	h.mu.Unlock()
+
+	log.Printf("[browser] verbunden von %s (gesamt: %d)", r.RemoteAddr, n)
 
 	// Push current state to this connection before starting pumps.
 	if h.onNewClient != nil {
@@ -82,7 +85,9 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 	go c.readPump(func() {
 		h.mu.Lock()
 		delete(h.clients, c)
+		remaining := len(h.clients)
 		h.mu.Unlock()
+		log.Printf("[browser] getrennt von %s (verbleibend: %d)", r.RemoteAddr, remaining)
 	})
 }
 

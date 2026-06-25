@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"server/internal/config"
@@ -120,6 +121,10 @@ func (s *Server) HandleStart(w http.ResponseWriter, r *http.Request) {
 		Bitrate:       req.Bitrate,
 	})
 
+	log.Printf("[api] start stream=%s device=%s format=%s %dkbps %dHz L=%d R=%d → %s",
+		req.StreamID, req.DeviceID, req.Format, req.Bitrate, req.SampleRate,
+		req.ChannelLeft, req.ChannelRight, ingestURL)
+
 	sent := s.clientHub.Send(ClientCmd{
 		Type: "cmd:start",
 		Payload: CmdStartPayload{
@@ -153,6 +158,7 @@ func (s *Server) HandleStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	log.Printf("[api] stop stream=%s", req.StreamID)
 	s.relay.Unregister(req.StreamID)
 	s.clientHub.Send(ClientCmd{
 		Type:    "cmd:stop",
@@ -194,14 +200,26 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 		blocked = s.relay.HasRegisteredStreams()
 	}
 	if !blocked {
+		log.Printf("[api] monitor start monitorId=%s device=%s", cfg.MonitorID, cfg.DeviceID)
 		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:start", Payload: cfg})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // POST /api/monitor/stop
+// Body optional: {"monitorId":"..."} for per-card stop; empty body for global stop.
 func (s *Server) HandleMonitorStop(w http.ResponseWriter, r *http.Request) {
-	s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: nil})
+	var req struct {
+		MonitorID string `json:"monitorId"`
+	}
+	json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+	if req.MonitorID != "" {
+		log.Printf("[api] monitor stop monitorId=%s", req.MonitorID)
+		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: map[string]string{"monitorId": req.MonitorID}})
+	} else {
+		log.Printf("[api] monitor stop (global)")
+		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: nil})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
