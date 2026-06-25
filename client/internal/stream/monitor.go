@@ -17,6 +17,25 @@ type MonitorConfig struct {
 	SampleRate   uint32 `json:"sampleRate"`
 	ChannelLeft  uint16 `json:"channelLeft"`
 	ChannelRight uint16 `json:"channelRight"`
+	// Channels overrides ChannelLeft/Right for ASIO multi-subscriber fan-out:
+	// open all of these 0-based channels in one ASIO session.
+	Channels []int
+}
+
+func (a MonitorConfig) equals(b MonitorConfig) bool {
+	if a.DeviceID != b.DeviceID || a.SampleRate != b.SampleRate ||
+		a.ChannelLeft != b.ChannelLeft || a.ChannelRight != b.ChannelRight {
+		return false
+	}
+	if len(a.Channels) != len(b.Channels) {
+		return false
+	}
+	for i := range a.Channels {
+		if a.Channels[i] != b.Channels[i] {
+			return false
+		}
+	}
+	return true
 }
 
 type Monitor struct {
@@ -31,6 +50,13 @@ type Monitor struct {
 }
 
 func NewMonitor() *Monitor { return &Monitor{} }
+
+// Cap returns the active capturer or nil. Used by callers to set ASIO-specific callbacks.
+func (m *Monitor) Cap() audio.Capturer {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cap
+}
 
 // LastConfig returns the configuration the monitor is currently running with.
 func (m *Monitor) LastConfig() MonitorConfig {
@@ -54,7 +80,7 @@ func (m *Monitor) Start(cfg MonitorConfig) error {
 	if cfg.ChannelRight == 0 { cfg.ChannelRight = 2 }
 
 	m.mu.Lock()
-	if m.running && m.lastCfg == cfg {
+	if m.running && m.lastCfg.equals(cfg) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -70,11 +96,12 @@ func (m *Monitor) Start(cfg MonitorConfig) error {
 	// opMu ensures a concurrent Stop() blocks here and only runs after we return.
 	// For non-ASIO devices: if the new capturer fails, the old one keeps running.
 	newCap := audio.NewCapturer(audio.CaptureConfig{
-		DeviceID:    cfg.DeviceID,
-		SampleRate:  cfg.SampleRate,
+		DeviceID:     cfg.DeviceID,
+		SampleRate:   cfg.SampleRate,
 		ChannelLeft:  cfg.ChannelLeft,
 		ChannelRight: cfg.ChannelRight,
-		BitDepth:    16,
+		BitDepth:     16,
+		Channels:     cfg.Channels,
 	})
 	newCtx, newCancel := context.WithCancel(context.Background())
 	if err := newCap.Start(newCtx); err != nil {

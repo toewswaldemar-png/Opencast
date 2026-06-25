@@ -35,6 +35,9 @@ type CaptureConfig struct {
 	ChannelLeft  uint16 // 1-based input channel for L (0 = use default: 1)
 	ChannelRight uint16 // 1-based input channel for R (0 = use default: 2)
 	BitDepth     uint16
+	// Channels overrides ChannelLeft/Right for ASIO: explicit 0-based channel list.
+	// Used by multi-subscriber fan-out to open all needed channels in one session.
+	Channels []int
 }
 
 type LevelUpdate struct {
@@ -48,4 +51,14 @@ type Capturer interface {
 	OutputCh() <-chan []byte
 	LevelCh() <-chan LevelUpdate
 	ActualConfig() CaptureConfig
+}
+
+// MultiLevelCapturer extends Capturer with a raw PCM callback for per-subscriber
+// level dispatch. Implemented by ASIOCapturer; no-op for WASAPI.
+type MultiLevelCapturer interface {
+	Capturer
+	// SetMultiLevelCallback installs a callback invoked on every audio buffer
+	// with the full interleaved int16 PCM for all open channels.
+	// Called from the ASIO audio thread — must not block or retain pcm after return.
+	SetMultiLevelCallback(func(frames int, pcm []int16))
 }

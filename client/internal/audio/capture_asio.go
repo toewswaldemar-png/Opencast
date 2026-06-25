@@ -100,14 +100,26 @@ func goAsioBufferCallback(data unsafe.Pointer, numFrames C.int, _ C.int, numChan
 		capturer.sendPCM(buf)
 	} else {
 		// Monitor-only mode: pcmOut is full, no consumer active.
-		// Compute VU level directly from the C buffer — zero Go allocation.
-		capturer.computeLevelFromC(data, frames, nCh, now)
+		capturer.multiLevelMu.RLock()
+		mlCb := capturer.multiLevelCb
+		capturer.multiLevelMu.RUnlock()
+		if mlCb != nil {
+			// Multi-subscriber fan-out: pass raw int16 slice to the Go fan-out handler.
+			// The slice points into C's g_pcmBuf — valid only for this call.
+			capturer.lastLevelAt = now
+			pcm := unsafe.Slice((*int16)(data), frames*nCh)
+			mlCb(frames, pcm)
+		} else {
+			// Single-subscriber: compute VU level directly from the C buffer — zero Go allocation.
+			capturer.computeLevelFromC(data, frames, nCh, now)
+		}
 	}
 }
 
 type ASIOCapturer struct {
 	cfg            CaptureConfig
 	actualChannels int
+	openChs        []int // 0-based channels passed to asio_start_capture (sorted)
 	pcmOut         chan []byte
 	levels         chan LevelUpdate
 	stopCh         chan struct{}
@@ -115,6 +127,14 @@ type ASIOCapturer struct {
 	callbackOnce   sync.Once
 	callbackFired  atomic.Bool
 	lastLevelAt    time.Time // throttle VU updates to ~30 Hz
+	multiLevelCb   func(int, []int16)
+	multiLevelMu   sync.RWMutex
+}
+
+func (c *ASIOCapturer) SetMultiLevelCallback(cb func(frames int, pcm []int16)) {
+	c.multiLevelMu.Lock()
+	c.multiLevelCb = cb
+	c.multiLevelMu.Unlock()
 }
 
 // NewCapturer dispatches to ASIOCapturer for "asio:" devices, WasapiCapturer otherwise.
@@ -193,34 +213,51 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 			return
 		}
 
-		chL := int(c.cfg.ChannelLeft)
-		if chL < 1 {
-			chL = 1
-		}
-		chR := int(c.cfg.ChannelRight)
-		if chR < 1 {
-			chR = 2
-		}
-		chLIdx := chL - 1
-		chRIdx := chR - 1
-		if chLIdx >= int(numInputCh) {
-			chLIdx = int(numInputCh) - 1
-		}
-		if chRIdx >= int(numInputCh) {
-			chRIdx = int(numInputCh) - 1
-		}
-		c.actualChannels = 2
-
 		prefBuf := C.asio_get_preferred_buffer_size()
-		// When L == R, open only one ASIO channel to avoid passing duplicate
-		// channelNum values to createBuffers — some drivers (e.g. ReaRoute)
-		// fall back to sequential channels when they see duplicates.
-		// The Go callback expands the single channel to 2-channel stereo PCM.
+
 		var channels []C.int
-		if chLIdx == chRIdx {
-			channels = []C.int{C.int(chLIdx)}
+		if len(c.cfg.Channels) > 0 {
+			// Multi-subscriber fan-out mode: open all requested channels at once.
+			// Caller (main_windows.go) passes the sorted union of all subscriber channels.
+			channels = make([]C.int, len(c.cfg.Channels))
+			for i, ch := range c.cfg.Channels {
+				if ch >= int(numInputCh) {
+					ch = int(numInputCh) - 1
+				}
+				channels[i] = C.int(ch)
+			}
+			c.openChs = make([]int, len(c.cfg.Channels))
+			copy(c.openChs, c.cfg.Channels)
+			c.actualChannels = len(channels)
 		} else {
-			channels = []C.int{C.int(chLIdx), C.int(chRIdx)}
+			chL := int(c.cfg.ChannelLeft)
+			if chL < 1 {
+				chL = 1
+			}
+			chR := int(c.cfg.ChannelRight)
+			if chR < 1 {
+				chR = 2
+			}
+			chLIdx := chL - 1
+			chRIdx := chR - 1
+			if chLIdx >= int(numInputCh) {
+				chLIdx = int(numInputCh) - 1
+			}
+			if chRIdx >= int(numInputCh) {
+				chRIdx = int(numInputCh) - 1
+			}
+			c.actualChannels = 2
+			// When L == R, open only one ASIO channel to avoid passing duplicate
+			// channelNum values to createBuffers — some drivers (e.g. ReaRoute)
+			// fall back to sequential channels when they see duplicates.
+			// The Go callback expands the single channel to 2-channel stereo PCM.
+			if chLIdx == chRIdx {
+				channels = []C.int{C.int(chLIdx)}
+				c.openChs = []int{chLIdx}
+			} else {
+				channels = []C.int{C.int(chLIdx), C.int(chRIdx)}
+				c.openChs = []int{chLIdx, chRIdx}
+			}
 		}
 
 		globalASIOCapturer.Store(c)
@@ -234,8 +271,8 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 		}
 		log.Printf("[asio] start_capture: %v", time.Since(t2).Round(time.Millisecond))
 
-		log.Printf("[asio] Capture gestartet: L=%d R=%d bufSz=%d sr=%.0f (gesamt: %v)",
-			chLIdx, chRIdx, int(prefBuf), float64(sr), time.Since(t0).Round(time.Millisecond))
+		log.Printf("[asio] Capture gestartet: channels=%v bufSz=%d sr=%.0f (gesamt: %v)",
+			c.openChs, int(prefBuf), float64(sr), time.Since(t0).Round(time.Millisecond))
 		close(errCh)
 
 		go func() {

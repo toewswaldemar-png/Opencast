@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -28,10 +29,15 @@ var (
 	manager *stream.Manager
 
 	// One monitor capturer per device; multiple cards can subscribe to the same device.
-	deviceMonitor   = make(map[string]*stream.Monitor) // deviceId → capturer
-	deviceSubs      = make(map[string]map[string]bool)  // deviceId → {monitorId …}
-	monitorToDevice = make(map[string]string)            // monitorId → deviceId
-	monitorsMu      sync.Mutex
+	deviceMonitor   = make(map[string]*stream.Monitor)    // deviceId → monitor
+	deviceSubs      = make(map[string]map[string]bool)    // deviceId → {monitorId …}
+	monitorToDevice = make(map[string]string)             // monitorId → deviceId
+	// ASIO multi-channel fan-out: each subscriber tracks which 0-based ASIO channel
+	// indices it wants, and which buffer positions those map to in the shared PCM.
+	deviceSubsCh  = make(map[string]map[string][2]int) // deviceId → monitorId → [chL, chR] (ASIO idx)
+	deviceSubsPos = make(map[string]map[string][2]int) // deviceId → monitorId → [posL, posR] (PCM slot)
+	deviceOpenChs = make(map[string][]int)             // deviceId → sorted channels open in capturer
+	monitorsMu    sync.Mutex
 
 	mu          sync.Mutex
 	asioDevices []audio.Device // ASIO devices for tray submenu
@@ -98,78 +104,152 @@ func onReady() {
 		},
 		OnMonitorStart: func(p wsclient.CmdMonitorPayload) {
 			go func() {
-				// Don't monitor a card that is already streaming.
 				if manager.IsStreamRunning(p.MonitorID) {
 					return
 				}
-				// ASIO is exclusive: skip if a running stream already holds the device.
 				if strings.HasPrefix(p.DeviceID, "asio:") && manager.IsDeviceInUse(p.DeviceID) {
 					return
 				}
 
+				isASIO := strings.HasPrefix(p.DeviceID, "asio:")
+
 				monitorsMu.Lock()
 
-				// If this card was previously subscribed to a different device, clean that up.
+				// Clean up old device subscription if this card switched devices.
 				if oldDev := monitorToDevice[p.MonitorID]; oldDev != "" && oldDev != p.DeviceID {
 					delete(monitorToDevice, p.MonitorID)
 					delete(deviceSubs[oldDev], p.MonitorID)
-					// If no cards remain for the old device, remove and stop its monitor.
+					delete(deviceSubsCh[oldDev], p.MonitorID)
+					delete(deviceSubsPos[oldDev], p.MonitorID)
 					if len(deviceSubs[oldDev]) == 0 {
 						delete(deviceSubs, oldDev)
+						delete(deviceSubsCh, oldDev)
+						delete(deviceSubsPos, oldDev)
+						delete(deviceOpenChs, oldDev)
 						if m := deviceMonitor[oldDev]; m != nil {
 							delete(deviceMonitor, oldDev)
 							monitorsMu.Unlock()
-							m.Stop() // released lock first to avoid deadlock with level callback
+							m.Stop()
 							monitorsMu.Lock()
 						}
 					}
 				}
 
-				// Subscribe this card to the target device.
+				// Subscribe this card.
 				if deviceSubs[p.DeviceID] == nil {
 					deviceSubs[p.DeviceID] = make(map[string]bool)
 				}
 				deviceSubs[p.DeviceID][p.MonitorID] = true
 				monitorToDevice[p.MonitorID] = p.DeviceID
 
+				// For ASIO: compute the union of all subscriber channels so the capturer
+				// opens exactly one session covering every card on this device.
+				var allChs []int
+				if isASIO {
+					chL0 := int(p.ChannelLeft) - 1
+					if chL0 < 0 {
+						chL0 = 0
+					}
+					chR0 := int(p.ChannelRight) - 1
+					if chR0 < 0 {
+						chR0 = 1
+					}
+					if deviceSubsCh[p.DeviceID] == nil {
+						deviceSubsCh[p.DeviceID] = make(map[string][2]int)
+					}
+					deviceSubsCh[p.DeviceID][p.MonitorID] = [2]int{chL0, chR0}
+
+					// Build sorted union of all needed channel indices.
+					chSet := make(map[int]bool)
+					for _, ch := range deviceSubsCh[p.DeviceID] {
+						chSet[ch[0]] = true
+						chSet[ch[1]] = true
+					}
+					allChs = make([]int, 0, len(chSet))
+					for ch := range chSet {
+						allChs = append(allChs, ch)
+					}
+					sort.Ints(allChs)
+					deviceOpenChs[p.DeviceID] = allChs
+
+					// Recompute PCM-buffer positions for ALL subscribers from the new union.
+					if deviceSubsPos[p.DeviceID] == nil {
+						deviceSubsPos[p.DeviceID] = make(map[string][2]int)
+					}
+					for id, ch := range deviceSubsCh[p.DeviceID] {
+						posL := asioIndexOf(allChs, ch[0])
+						posR := asioIndexOf(allChs, ch[1])
+						deviceSubsPos[p.DeviceID][id] = [2]int{posL, posR}
+					}
+				}
+
 				// Create the device monitor if it does not yet exist.
 				mon := deviceMonitor[p.DeviceID]
 				if mon == nil {
 					mon = stream.NewMonitor()
-					dev := p.DeviceID
-					mon.SetLevelCallback(func(lvl audio.LevelUpdate) {
-						// Fan-out to all cards currently subscribed to this device.
-						monitorsMu.Lock()
-						ids := make([]string, 0, len(deviceSubs[dev]))
-						for id := range deviceSubs[dev] {
-							ids = append(ids, id)
-						}
-						monitorsMu.Unlock()
-						for _, id := range ids {
-							if ws != nil {
-								ws.SendMonitorLevel(id, lvl)
+					if !isASIO {
+						// WASAPI: same-level fan-out (no per-channel distinction needed).
+						dev := p.DeviceID
+						mon.SetLevelCallback(func(lvl audio.LevelUpdate) {
+							monitorsMu.Lock()
+							ids := make([]string, 0, len(deviceSubs[dev]))
+							for id := range deviceSubs[dev] {
+								ids = append(ids, id)
 							}
-						}
-					})
+							monitorsMu.Unlock()
+							for _, id := range ids {
+								if ws != nil {
+									ws.SendMonitorLevel(id, lvl)
+								}
+							}
+						})
+					}
 					deviceMonitor[p.DeviceID] = mon
 				}
 				monitorsMu.Unlock()
 
-				log.Printf("[monitor/%s] cmd:monitor:start — device=%s sr=%d L=%d R=%d",
-					p.MonitorID, p.DeviceID, p.SampleRate, p.ChannelLeft, p.ChannelRight)
-				if err := mon.Start(stream.MonitorConfig{
-					DeviceID:    p.DeviceID,
-					SampleRate:  p.SampleRate,
+				cfg := stream.MonitorConfig{
+					DeviceID:     p.DeviceID,
+					SampleRate:   p.SampleRate,
 					ChannelLeft:  p.ChannelLeft,
 					ChannelRight: p.ChannelRight,
-				}); err != nil {
+					Channels:     allChs, // nil for WASAPI
+				}
+				log.Printf("[monitor/%s] cmd:monitor:start — device=%s sr=%d L=%d R=%d channels=%v",
+					p.MonitorID, p.DeviceID, p.SampleRate, p.ChannelLeft, p.ChannelRight, allChs)
+
+				if err := mon.Start(cfg); err != nil {
 					log.Printf("[monitor/%s] Start fehlgeschlagen (device=%s): %v", p.MonitorID, p.DeviceID, err)
 					if ws != nil {
 						ws.SendError("monitor:"+p.MonitorID, err.Error())
 					}
-				} else {
-					log.Printf("[monitor/%s] Monitor läuft: device=%s", p.MonitorID, p.DeviceID)
+					return
 				}
+
+				// For ASIO: install per-subscriber raw level dispatch.
+				// Must be set after every Start() because the capturer instance may change.
+				if isASIO {
+					if mlc, ok := mon.Cap().(audio.MultiLevelCapturer); ok {
+						devID := p.DeviceID
+						mlc.SetMultiLevelCallback(func(frames int, pcm []int16) {
+							monitorsMu.Lock()
+							subs := make(map[string][2]int, len(deviceSubsPos[devID]))
+							for id, pos := range deviceSubsPos[devID] {
+								subs[id] = pos
+							}
+							numCh := len(deviceOpenChs[devID])
+							monitorsMu.Unlock()
+							for id, pos := range subs {
+								lvl := audio.ExtractChannelLevel(pcm, frames, numCh, pos[0], pos[1])
+								if ws != nil {
+									ws.SendMonitorLevel(id, lvl)
+								}
+							}
+						})
+					}
+				}
+
+				log.Printf("[monitor/%s] Monitor läuft: device=%s", p.MonitorID, p.DeviceID)
 			}()
 		},
 		OnMonitorStop: func() {
@@ -290,8 +370,11 @@ func stopAllMonitors() {
 		toStop = append(toStop, m)
 		delete(deviceMonitor, dev)
 	}
-	for dev := range deviceSubs { delete(deviceSubs, dev) }
+	for dev := range deviceSubs      { delete(deviceSubs, dev) }
 	for mid := range monitorToDevice { delete(monitorToDevice, mid) }
+	for dev := range deviceSubsCh    { delete(deviceSubsCh, dev) }
+	for dev := range deviceSubsPos   { delete(deviceSubsPos, dev) }
+	for dev := range deviceOpenChs   { delete(deviceOpenChs, dev) }
 	monitorsMu.Unlock()
 	for _, m := range toStop {
 		m.Stop()
@@ -321,8 +404,13 @@ func handleStart(p wsclient.CmdStartPayload) {
 	if devID != "" {
 		delete(monitorToDevice, p.StreamID)
 		delete(deviceSubs[devID], p.StreamID)
+		delete(deviceSubsCh[devID], p.StreamID)
+		delete(deviceSubsPos[devID], p.StreamID)
 		if len(deviceSubs[devID]) == 0 {
 			delete(deviceSubs, devID)
+			delete(deviceSubsCh, devID)
+			delete(deviceSubsPos, devID)
+			delete(deviceOpenChs, devID)
 			monToStop = deviceMonitor[devID]
 			delete(deviceMonitor, devID)
 		}
@@ -359,6 +447,17 @@ func handleStart(p wsclient.CmdStartPayload) {
 
 func openBrowser(url string) {
 	exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+// asioIndexOf returns the position of ch in the sorted channels slice.
+// By construction ch is always present, so -1 is only possible on a bug.
+func asioIndexOf(chs []int, ch int) int {
+	for i, c := range chs {
+		if c == ch {
+			return i
+		}
+	}
+	return 0 // fallback: position 0 rather than panic
 }
 
 // generateIcon returns a 16x16 solid-orange Windows .ico file in memory.
