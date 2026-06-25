@@ -157,6 +157,10 @@ func onReady() {
 			registry.StopMonitors()
 		},
 
+		OnMonitorStopCard: func(monitorID string) {
+			go registry.Unsubscribe(monitorID)
+		},
+
 		OnAsioPanel: func(deviceID string) {
 			go func() {
 				clsid := strings.TrimPrefix(deviceID, "asio:")

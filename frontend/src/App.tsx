@@ -283,6 +283,11 @@ export default function App() {
 
   const removeServer = (id: string) => {
     if (allStatuses[id]) return
+    apiFetch('/api/monitor/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ monitorId: id }),
+    }).catch(() => {})
     setServers((ss) => ss.filter((s) => s.id !== id))
   }
 

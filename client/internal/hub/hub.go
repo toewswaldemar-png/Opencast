@@ -315,7 +315,6 @@ func (h *Hub) startCapturer(chs []int, sampleRate uint32) error {
 
 	if !h.isASIO {
 		go h.runLevelDispatch(cap)
-		go h.runPCMDispatch(cap)
 	}
 
 	h.reinstallCapturerCallbacks(cap)
@@ -569,26 +568,6 @@ func (h *Hub) runLevelDispatch(cap audio.Capturer) {
 		h.mu.Unlock()
 		for _, cb := range cbs {
 			cb(lvl)
-		}
-	}
-}
-
-// runPCMDispatch reads OutputCh and fans PCM to all streaming subscribers (WASAPI single-sub mode).
-func (h *Hub) runPCMDispatch(cap audio.Capturer) {
-	for pcm := range cap.OutputCh() {
-		h.mu.Lock()
-		chs := make([]chan []byte, 0)
-		for _, s := range h.subs {
-			if s.pcmCh != nil {
-				chs = append(chs, s.pcmCh)
-			}
-		}
-		h.mu.Unlock()
-		for _, ch := range chs {
-			select {
-			case ch <- pcm:
-			default:
-			}
 		}
 	}
 }

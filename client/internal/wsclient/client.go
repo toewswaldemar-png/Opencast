@@ -55,9 +55,10 @@ type CmdMonitorPayload struct {
 type Handlers struct {
 	OnStart        func(CmdStartPayload)
 	OnStop         func(CmdStopPayload)
-	OnMonitorStart func(CmdMonitorPayload)
-	OnMonitorStop  func()
-	OnAsioPanel    func(deviceID string)
+	OnMonitorStart     func(CmdMonitorPayload)
+	OnMonitorStop      func()
+	OnMonitorStopCard  func(monitorID string)
+	OnAsioPanel        func(deviceID string)
 	OnConnected    func()
 	OnDisconnected func()
 }
@@ -189,7 +190,13 @@ func (c *Client) handleCmd(cmd Cmd) {
 			c.handlers.OnMonitorStart(p)
 		}
 	case "cmd:monitor:stop":
-		if c.handlers.OnMonitorStop != nil {
+		var p struct {
+			MonitorID string `json:"monitorId"`
+		}
+		json.Unmarshal(cmd.Payload, &p) //nolint:errcheck
+		if p.MonitorID != "" && c.handlers.OnMonitorStopCard != nil {
+			c.handlers.OnMonitorStopCard(p.MonitorID)
+		} else if c.handlers.OnMonitorStop != nil {
 			c.handlers.OnMonitorStop()
 		}
 	case "cmd:asio:panel":

@@ -207,8 +207,19 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/monitor/stop
+// Body optional: {"monitorId":"..."} for per-card stop; empty body for global stop.
 func (s *Server) HandleMonitorStop(w http.ResponseWriter, r *http.Request) {
-	s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: nil})
+	var req struct {
+		MonitorID string `json:"monitorId"`
+	}
+	json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+	if req.MonitorID != "" {
+		log.Printf("[api] monitor stop monitorId=%s", req.MonitorID)
+		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: map[string]string{"monitorId": req.MonitorID}})
+	} else {
+		log.Printf("[api] monitor stop (global)")
+		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: nil})
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
