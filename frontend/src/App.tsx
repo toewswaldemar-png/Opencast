@@ -8,7 +8,7 @@ import GlobalSettingsDialog from './components/GlobalSettingsDialog'
 import { useWebSocket } from './hooks/useWebSocket'
 import { apiFetch }     from './lib/api'
 import {
-  ServerEntry, ServerConfig, EncoderConfig,
+  ServerEntry, ServerConfig, EncoderConfig, StreamStatus,
   AllStreamStatus, LevelUpdate, WSPayload,
   makeServerEntry, DEFAULT_ENCODER,
 } from './types'
@@ -129,6 +129,11 @@ export default function App() {
           setAllStatuses(prev => ({ ...prev, [id]: s as unknown as import('./types').StreamStatus }))
         } else {
           setAllStatuses(prev => { const n = { ...prev }; delete n[id]; return n })
+          const errMsg = s['error'] as string | undefined
+          if (errMsg) {
+            setStreamErrors(prev => ({ ...prev, [id]: errMsg }))
+            setTimeout(() => setStreamErrors(prev => { const n = { ...prev }; delete n[id]; return n }), 8000)
+          }
         }
       }
     } else if (msg.type === 'level') {
@@ -234,6 +239,15 @@ export default function App() {
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         showStreamError(serverId, data.error ?? `Fehler ${res.status}`)
+      } else {
+        // Optimistic: bridge HTTP-200-to-WS gap so button shows "Verbindet…" without Zucken.
+        setAllStatuses(prev => ({
+          ...prev,
+          [serverId]: {
+            running: true, connected: false, reconnecting: false,
+            uptime: 0, bytesSent: 0, bitrate: enc.bitrate, listeners: 0,
+          } as StreamStatus,
+        }))
       }
     } catch (err) {
       showStreamError(serverId, err instanceof Error ? err.message : 'Netzwerkfehler')

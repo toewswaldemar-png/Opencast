@@ -10,6 +10,8 @@ import (
 	"math"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -42,11 +44,28 @@ type WasapiCapturer struct {
 	stopCh      chan struct{}
 	doneCh      chan struct{}
 	lastLevelAt time.Time // throttle VU updates to ~30 Hz
+
+	pcmFanOutCb  func([]byte)
+	pcmFanOutMu  sync.RWMutex
+	hasFanOut    atomic.Bool
 }
 
 func (c *WasapiCapturer) OutputCh() <-chan []byte     { return c.pcmOut }
 func (c *WasapiCapturer) LevelCh() <-chan LevelUpdate { return c.levels }
+func (c *WasapiCapturer) Done() <-chan struct{}        { return c.doneCh }
 func (c *WasapiCapturer) ActualConfig() CaptureConfig { return c.actual }
+
+// SetPCMFanOutCallback installs a callback receiving the full multi-channel
+// int16 LE PCM buffer for each captured packet. When set, channel extraction
+// and LevelCh output are bypassed — the hub handles per-subscriber routing.
+// Implements PCMFanOutCapturer.
+func (c *WasapiCapturer) SetPCMFanOutCallback(cb func([]byte)) {
+	c.pcmFanOutMu.Lock()
+	c.pcmFanOutCb = cb
+	c.hasFanOut.Store(cb != nil)
+	c.pcmFanOutMu.Unlock()
+	log.Printf("[wasapi/%s] fan-out: %v", c.cfg.DeviceID, cb != nil)
+}
 
 func (c *WasapiCapturer) isLoopback() bool {
 	return strings.HasPrefix(c.cfg.DeviceID, "loopback:")
@@ -57,6 +76,8 @@ func (c *WasapiCapturer) Start(ctx context.Context) error {
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
+		defer close(c.levels)
+		defer close(c.pcmOut)
 		defer close(c.doneCh)
 
 		if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
@@ -120,11 +141,12 @@ func (c *WasapiCapturer) initCapture() (*wca.IMMDeviceEnumerator, *wca.IAudioCli
 	c.srcBPS = uint32(mixFmt.WBitsPerSample) / 8
 	c.nativeCh = int(mixFmt.NChannels)
 	c.actual = CaptureConfig{
-		DeviceID:    c.cfg.DeviceID,
-		SampleRate:  mixFmt.NSamplesPerSec,
-		ChannelLeft:  c.cfg.ChannelLeft,
-		ChannelRight: c.cfg.ChannelRight,
-		BitDepth:    16,
+		DeviceID:       c.cfg.DeviceID,
+		SampleRate:     mixFmt.NSamplesPerSec,
+		ChannelLeft:    c.cfg.ChannelLeft,
+		ChannelRight:   c.cfg.ChannelRight,
+		BitDepth:       16,
+		NativeChannels: c.nativeCh,
 	}
 
 	var streamFlags uint32
@@ -267,6 +289,18 @@ func (c *WasapiCapturer) readAvailablePackets(cc *wca.IAudioCaptureClient) {
 			pcm = wasapiIntToI16(raw, c.srcBPS)
 		}
 
+		// Fan-out mode: hub handles per-subscriber channel extraction and levels.
+		if c.hasFanOut.Load() {
+			c.pcmFanOutMu.RLock()
+			cb := c.pcmFanOutCb
+			c.pcmFanOutMu.RUnlock()
+			if cb != nil {
+				cb(pcm) // full multi-channel int16 LE buffer
+				continue
+			}
+		}
+
+		// Single-subscriber path: extract configured channel pair.
 		leftIdx := int(c.cfg.ChannelLeft) - 1
 		rightIdx := int(c.cfg.ChannelRight) - 1
 		if leftIdx < 0 {

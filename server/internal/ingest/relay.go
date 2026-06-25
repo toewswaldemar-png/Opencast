@@ -27,6 +27,7 @@ type StatusUpdate struct {
 	Uptime       time.Duration
 	Listeners    int
 	Bitrate      int
+	Error        string // non-empty when connection failed
 }
 
 // Relay accepts audio streams from the Windows client and relays them to Icecast.
@@ -84,11 +85,15 @@ func (r *Relay) Register(streamID string, cfg StreamConfig) {
 	go func() {
 		time.Sleep(30 * time.Second)
 		r.mu.Lock()
-		if _, still := r.pending[streamID]; still {
+		_, still := r.pending[streamID]
+		if still {
 			delete(r.pending, streamID)
-			log.Printf("[ingest/%s] pending timed out — kein PUT vom Client empfangen", streamID)
 		}
 		r.mu.Unlock()
+		if still {
+			log.Printf("[ingest/%s] pending timed out — kein PUT vom Client empfangen", streamID)
+			r.notify(StatusUpdate{StreamID: streamID}) // Connected:false → Browser löscht Status
+		}
 	}()
 }
 
@@ -181,6 +186,7 @@ func (r *Relay) HandleIngest(w http.ResponseWriter, req *http.Request) {
 	t1 := time.Now()
 	if err := ice.Connect(); err != nil {
 		log.Printf("[ingest/%s] Icecast connect failed: %v", streamID, err)
+		r.notify(StatusUpdate{StreamID: streamID, Connected: false, Error: err.Error()})
 		return
 	}
 	log.Printf("[ingest/%s] Icecast connect: %v", streamID, time.Since(t1).Round(time.Millisecond))

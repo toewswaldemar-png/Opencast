@@ -3,10 +3,12 @@ package main
 import (
 	"embed"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -20,6 +22,13 @@ import (
 var staticFiles embed.FS
 
 func main() {
+	if exe, err := os.Executable(); err == nil {
+		logPath := filepath.Join(filepath.Dir(exe), "opencast-server.log")
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			log.SetOutput(io.MultiWriter(os.Stdout, f))
+		}
+	}
+
 	store, err := config.NewStore()
 	if err != nil {
 		log.Fatalf("config store: %v", err)
@@ -75,6 +84,7 @@ func main() {
 			"uptime":       u.Uptime.Nanoseconds(),
 			"listeners":    u.Listeners,
 			"bitrate":      u.Bitrate,
+			"error":        u.Error,
 		})
 	})
 
