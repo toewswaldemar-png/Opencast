@@ -13,7 +13,16 @@ import (
 	"time"
 
 	"client/internal/audio"
+	"client/internal/pcmbuffer"
+	"client/internal/streamsession"
 )
+
+// defaultFrameSize is the PCMBuffer frame size in bytes: 256 stereo s16le samples.
+// Fan-out callbacks chop extracted stereo PCM into frames of this size.
+const defaultFrameSize = 1024
+
+// defaultBufCapFrames is the default PCMBuffer capacity in frames (~260ms at 48kHz).
+const defaultBufCapFrames = 50
 
 // StreamConfig holds encoding + ingest parameters for a streaming subscriber.
 type StreamConfig struct {
@@ -41,13 +50,9 @@ type subscriber struct {
 	sampleRate uint32
 
 	// non-nil only for streaming subscribers
-	streamCfg    *StreamConfig
-	pcmCh        chan []byte
-	encoder      *audio.Encoder
-	streamCtx    context.Context
-	streamCancel context.CancelFunc
-	streamDone   chan struct{}
-	startedAt    time.Time
+	streamCfg *StreamConfig
+	buf       *pcmbuffer.PCMBuffer
+	session   *streamsession.Session
 }
 
 // Hub manages one audio device: one capturer shared by all subscribers.
@@ -90,19 +95,11 @@ func (h *Hub) Subscribe(id string, chL, chR uint16, sampleRate uint32, cbs Callb
 // StartStream adds a streaming subscriber (level + encoding + Icecast ingest).
 func (h *Hub) StartStream(id string, chL, chR uint16, sampleRate uint32, scfg StreamConfig, cbs Callbacks) error {
 	chL0, chR0 := clamp0(chL), clamp0(chR)
-	ctx, cancel := context.WithCancel(context.Background())
 	sub := &subscriber{
 		id: id, chL: chL0, chR: chR0, cbs: cbs, sampleRate: sampleRate,
-		streamCfg: &scfg, pcmCh: make(chan []byte, 32),
-		streamCtx: ctx, streamCancel: cancel,
-		streamDone: make(chan struct{}),
-		startedAt:  time.Now(),
+		streamCfg: &scfg,
 	}
-	if err := h.addSub(sub); err != nil {
-		cancel()
-		return err
-	}
-	return nil
+	return h.addSub(sub)
 }
 
 // Unsubscribe removes a subscriber and stops its stream if active.
@@ -124,11 +121,8 @@ func (h *Hub) Unsubscribe(id string) {
 	log.Printf("[hub/%s] sub- id=%s (remaining=%d)", h.deviceID, id, len(h.subs))
 	h.mu.Unlock()
 
-	if sub.streamCancel != nil {
-		sub.streamCancel()
-	}
-	if sub.encoder != nil {
-		sub.encoder.Close()
+	if sub.session != nil {
+		sub.session.Stop()
 	}
 
 	if empty {
@@ -175,11 +169,8 @@ func (h *Hub) StopAll() {
 	h.mu.Unlock()
 
 	for _, s := range subs {
-		if s.streamCancel != nil {
-			s.streamCancel()
-		}
-		if s.encoder != nil {
-			s.encoder.Close()
+		if s.session != nil {
+			s.session.Stop()
 		}
 	}
 	h.stopCapturer()
@@ -322,7 +313,7 @@ func (h *Hub) startCapturer(chs []int, sampleRate uint32) error {
 	h.mu.Lock()
 	streamSubs := make([]*subscriber, 0)
 	for _, s := range h.subs {
-		if s.streamCfg != nil && s.encoder == nil {
+		if s.streamCfg != nil && s.session == nil {
 			streamSubs = append(streamSubs, s)
 		}
 	}
@@ -463,9 +454,6 @@ func (h *Hub) reinstallASIOCallbacks(cap audio.Capturer) {
 	}
 }
 
-// reinstallWASAPICallbacks installs a PCM fan-out callback when streaming
-// subscribers are present so each gets its own channel-pair extraction.
-// Monitor-only mode uses LevelCh() dispatched by runLevelDispatch.
 func (h *Hub) reinstallWASAPICallbacks(cap audio.Capturer) {
 	pfc, ok := cap.(audio.PCMFanOutCapturer)
 	if !ok {
@@ -494,19 +482,27 @@ func (h *Hub) reinstallWASAPICallbacks(cap audio.Capturer) {
 }
 
 // buildFanOutCb returns a PCM fan-out callback for streaming mode (ASIO + WASAPI).
-// It extracts per-subscriber stereo PCM and dispatches throttled VU levels.
+// It extracts per-subscriber stereo PCM, writes frames into PCMBuffers,
+// and dispatches throttled VU levels.
 func (h *Hub) buildFanOutCb() func([]byte) {
 	var lastLvlAt time.Time
 	return func(buf []byte) {
 		h.mu.Lock()
 		type entry struct {
 			posL, posR int
-			pcmCh      chan []byte
+			pcmBuf     *pcmbuffer.PCMBuffer
+			frameSize  int
 			lvlCb      func(audio.LevelUpdate)
 		}
 		entries := make([]entry, 0, len(h.subs))
 		for _, s := range h.subs {
-			entries = append(entries, entry{s.posL, s.posR, s.pcmCh, s.cbs.OnLevel})
+			entries = append(entries, entry{
+				posL:      s.posL,
+				posR:      s.posR,
+				pcmBuf:    s.buf,
+				frameSize: defaultFrameSize,
+				lvlCb:     s.cbs.OnLevel,
+			})
 		}
 		numCh := h.nativeCh
 		h.mu.Unlock()
@@ -519,12 +515,15 @@ func (h *Hub) buildFanOutCb() func([]byte) {
 
 		for _, e := range entries {
 			stereo := audio.ExtractStereoBytes(buf, numCh, e.posL, e.posR)
-			if e.pcmCh != nil && len(stereo) > 0 {
-				select {
-				case e.pcmCh <- stereo:
-				default:
+
+			// Write complete frames into the PCMBuffer.
+			if e.pcmBuf != nil {
+				for i := 0; i+e.frameSize <= len(stereo); i += e.frameSize {
+					e.pcmBuf.WriteFrame(stereo[i : i+e.frameSize])
 				}
 			}
+
+			// Level update (throttled, for all subscribers including monitor).
 			if sendLvl && len(stereo) >= 4 && e.lvlCb != nil {
 				e.lvlCb(audio.LevelFromStereoBytes(stereo))
 			}
@@ -572,7 +571,7 @@ func (h *Hub) runLevelDispatch(cap audio.Capturer) {
 	}
 }
 
-// launchStreamSub creates the encoder and starts audio/ingest goroutines for a streaming subscriber.
+// launchStreamSub creates the PCMBuffer and StreamSession for a streaming subscriber.
 func (h *Hub) launchStreamSub(s *subscriber, actualSR uint32) {
 	if s.streamCfg == nil {
 		return
@@ -580,102 +579,44 @@ func (h *Hub) launchStreamSub(s *subscriber, actualSR uint32) {
 	if actualSR == 0 {
 		actualSR = s.sampleRate
 	}
-	enc, err := audio.NewEncoder(audio.EncoderConfig{
-		Format:          s.streamCfg.Format,
-		Bitrate:         s.streamCfg.Bitrate,
-		SampleRate:      s.streamCfg.SampleRate,
-		Channels:        2,
-		InputSampleRate: actualSR,
-		InputChannels:   2,
-	})
-	if err != nil {
-		log.Printf("[hub/%s] Encoder-Fehler für %s: %v", h.deviceID, s.id, err)
-		if s.cbs.OnError != nil {
-			s.cbs.OnError(err.Error())
-		}
-		return
-	}
+
+	buf := pcmbuffer.New(defaultFrameSize, defaultBufCapFrames)
 
 	h.mu.Lock()
-	s.encoder = enc
+	s.buf = buf
 	h.mu.Unlock()
 
-	log.Printf("[stream/%s] Encoder gestartet: format=%s bitrate=%d inSR=%d outSR=%d",
-		s.id, s.streamCfg.Format, s.streamCfg.Bitrate, actualSR, s.streamCfg.SampleRate)
-
-	go h.pumpAudio(s)
-	go h.pumpIngest(s)
-}
-
-func (h *Hub) pumpAudio(s *subscriber) {
-	for {
-		select {
-		case <-s.streamCtx.Done():
-			return
-		case pcm, ok := <-s.pcmCh:
-			if !ok {
-				return
-			}
-			if s.encoder != nil {
-				s.encoder.Write(pcm) //nolint:errcheck
-			}
-		}
-	}
-}
-
-func (h *Hub) pumpIngest(s *subscriber) {
-	defer close(s.streamDone)
-
-	if s.cbs.OnStatus != nil {
-		s.cbs.OnStatus(true, false, 0, 0)
+	outSR := s.streamCfg.SampleRate
+	if outSR == 0 {
+		outSR = actualSR
 	}
 
-	ingestFn := s.streamCfg.IngestFunc
-	contentType := s.streamCfg.Format.ContentType()
-	ingestURL := s.streamCfg.IngestURL
+	sess := streamsession.New(streamsession.Config{
+		SampleRate:       actualSR,
+		FrameSize:        defaultFrameSize,
+		Format:           s.streamCfg.Format,
+		Bitrate:          s.streamCfg.Bitrate,
+		OutputSampleRate: outSR,
+		IngestURL:        s.streamCfg.IngestURL,
+		IngestFunc:       s.streamCfg.IngestFunc,
+	}, buf, streamsession.Callbacks{
+		OnStatus: s.cbs.OnStatus,
+		OnError:  s.cbs.OnError,
+	})
 
-	pr, pw := io.Pipe()
+	h.mu.Lock()
+	s.session = sess
+	h.mu.Unlock()
 
-	go func() {
-		r := s.encoder.Output()
-		buf := make([]byte, 4096)
-		first := true
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				if first {
-					log.Printf("[stream/%s] erster Encoder-Output: %d Bytes", s.id, n)
-					first = false
-					if s.cbs.OnStatus != nil {
-						s.cbs.OnStatus(true, true, 0, time.Since(s.startedAt))
-					}
-				}
-				if _, werr := pw.Write(buf[:n]); werr != nil {
-					pw.CloseWithError(werr)
-					return
-				}
-			}
-			if err != nil {
-				pw.CloseWithError(err)
-				return
-			}
-		}
-	}()
+	log.Printf("[hub/%s] StreamSession erstellt: id=%s inSR=%d outSR=%d format=%s bitrate=%d",
+		h.deviceID, s.id, actualSR, outSR, s.streamCfg.Format, s.streamCfg.Bitrate)
 
-	log.Printf("[stream/%s] Ingest → %s", s.id, ingestURL)
-	err := ingestFn(s.streamCtx, ingestURL, contentType, pr)
-	if err != nil && s.streamCtx.Err() == nil {
-		log.Printf("[stream/%s] Ingest Fehler: %v", s.id, err)
+	if err := sess.Start(); err != nil {
+		log.Printf("[hub/%s] StreamSession Start fehlgeschlagen für %s: %v", h.deviceID, s.id, err)
 		if s.cbs.OnError != nil {
 			s.cbs.OnError(err.Error())
 		}
 	}
-	pr.Close()
-
-	if s.cbs.OnStatus != nil {
-		s.cbs.OnStatus(false, false, 0, 0)
-	}
-	log.Printf("[stream/%s] Ingest beendet", s.id)
 }
 
 // --- ASIO channel helpers ---

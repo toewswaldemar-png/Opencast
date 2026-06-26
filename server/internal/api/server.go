@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
+	"time"
 
 	"server/internal/config"
 	"server/internal/icecast"
@@ -18,15 +20,22 @@ type Server struct {
 	clientHub *ClientHub
 	relay     *ingest.Relay
 	baseURL   string // e.g. "http://localhost:8765" — used to build ingest URLs for the client
+
+	// Monitor state: tracks running monitors to debounce stop/start cycles on browser reload.
+	monitorMu      sync.Mutex
+	activeMonitors map[string]CmdMonitorPayload // monitorId → current config
+	stopSnapshot   map[string]CmdMonitorPayload // non-nil while global stop is debouncing
+	stopTimer      *time.Timer
 }
 
 func NewServer(store *config.Store, hub *Hub, clientHub *ClientHub, relay *ingest.Relay, baseURL string) *Server {
 	return &Server{
-		store:     store,
-		hub:       hub,
-		clientHub: clientHub,
-		relay:     relay,
-		baseURL:   baseURL,
+		store:          store,
+		hub:            hub,
+		clientHub:      clientHub,
+		relay:          relay,
+		baseURL:        baseURL,
+		activeMonitors: make(map[string]CmdMonitorPayload),
 	}
 }
 
@@ -191,6 +200,7 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	// Block only if THIS card's stream is active (each card has its own monitor).
 	// Fall back to the global guard when no monitorId is present (legacy/safety).
 	blocked := false
@@ -199,10 +209,40 @@ func (s *Server) HandleMonitorStart(w http.ResponseWriter, r *http.Request) {
 	} else {
 		blocked = s.relay.HasRegisteredStreams()
 	}
-	if !blocked {
-		log.Printf("[api] monitor start monitorId=%s device=%s", cfg.MonitorID, cfg.DeviceID)
-		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:start", Payload: cfg})
+	if blocked {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
 	}
+
+	// Grace-period check: if a global stop is pending and this monitor was running
+	// with the exact same config, it's a browser-reload cycle — cancel the stop
+	// and return without touching the client (monitor was never interrupted).
+	s.monitorMu.Lock()
+	if s.stopSnapshot != nil {
+		prev, inSnapshot := s.stopSnapshot[cfg.MonitorID]
+		if inSnapshot &&
+			prev.DeviceID == cfg.DeviceID &&
+			prev.SampleRate == cfg.SampleRate &&
+			prev.ChannelLeft == cfg.ChannelLeft &&
+			prev.ChannelRight == cfg.ChannelRight {
+
+			if s.stopTimer != nil {
+				s.stopTimer.Stop()
+				s.stopTimer = nil
+			}
+			s.stopSnapshot = nil
+			s.activeMonitors[cfg.MonitorID] = cfg
+			s.monitorMu.Unlock()
+			log.Printf("[api] monitor start (reconnect, no client traffic) monitorId=%s", cfg.MonitorID)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		}
+	}
+	s.activeMonitors[cfg.MonitorID] = cfg
+	s.monitorMu.Unlock()
+
+	log.Printf("[api] monitor start monitorId=%s device=%s", cfg.MonitorID, cfg.DeviceID)
+	s.clientHub.Send(ClientCmd{Type: "cmd:monitor:start", Payload: cfg})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -213,13 +253,40 @@ func (s *Server) HandleMonitorStop(w http.ResponseWriter, r *http.Request) {
 		MonitorID string `json:"monitorId"`
 	}
 	json.NewDecoder(r.Body).Decode(&req) //nolint:errcheck
+
 	if req.MonitorID != "" {
+		// Per-card stop: explicit user action, forward immediately.
+		s.monitorMu.Lock()
+		delete(s.activeMonitors, req.MonitorID)
+		s.monitorMu.Unlock()
 		log.Printf("[api] monitor stop monitorId=%s", req.MonitorID)
 		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: map[string]string{"monitorId": req.MonitorID}})
-	} else {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Global stop: enter 300ms grace period.
+	// If monitor/start arrives within this window with the same config, the stop
+	// is cancelled — this absorbs the stop/start cycle caused by browser reloads.
+	s.monitorMu.Lock()
+	if s.stopTimer != nil {
+		s.stopTimer.Stop()
+	}
+	s.stopSnapshot = make(map[string]CmdMonitorPayload, len(s.activeMonitors))
+	for k, v := range s.activeMonitors {
+		s.stopSnapshot[k] = v
+	}
+	s.stopTimer = time.AfterFunc(300*time.Millisecond, func() {
+		s.monitorMu.Lock()
+		s.stopSnapshot = nil
+		s.stopTimer = nil
+		s.activeMonitors = make(map[string]CmdMonitorPayload)
+		s.monitorMu.Unlock()
 		log.Printf("[api] monitor stop (global)")
 		s.clientHub.Send(ClientCmd{Type: "cmd:monitor:stop", Payload: nil})
-	}
+	})
+	s.monitorMu.Unlock()
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

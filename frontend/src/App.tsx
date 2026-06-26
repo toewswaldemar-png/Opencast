@@ -49,7 +49,8 @@ export default function App() {
   const cardLevelRefsRef  = useRef<Record<string, React.MutableRefObject<LevelUpdate>>>({})
   const monitorDecayRef   = useRef<number | null>(null)
 
-  const configReady    = useRef(false)
+  const configReady      = useRef(false)
+  const configJustLoaded = useRef(false)
   const serversRef     = useRef(servers)
   serversRef.current   = servers
   const allStatusesRef = useRef(allStatuses)
@@ -62,6 +63,7 @@ export default function App() {
       .then((r) => r.json())
       .then((cfg) => {
         configReady.current = true
+        configJustLoaded.current = true
         const globalEncoder: EncoderConfig = cfg.encoder
           ? { ...DEFAULT_ENCODER, ...cfg.encoder }
           : DEFAULT_ENCODER
@@ -103,6 +105,7 @@ export default function App() {
 
   useEffect(() => {
     if (!configReady.current) return
+    if (configJustLoaded.current) { configJustLoaded.current = false; return }
     const t = setTimeout(saveConfig, 500)
     return () => clearTimeout(t)
   }, [servers, encoderConfig, selectedDevice, autoReconnect]) // eslint-disable-line
