@@ -22,8 +22,9 @@ import (
 )
 
 type ASIOCapturer struct {
-	cfg            CaptureConfig
-	actualChannels int
+	cfg              CaptureConfig
+	actualSampleRate uint32
+	actualChannels   int
 	openChs        []int // 0-based channels passed to asio_start_capture (sorted)
 	pcmOut         chan []byte
 	levels         chan LevelUpdate
@@ -77,9 +78,13 @@ func (c *ASIOCapturer) LevelCh() <-chan LevelUpdate { return c.levels }
 func (c *ASIOCapturer) Done() <-chan struct{}        { return c.doneCh }
 
 func (c *ASIOCapturer) ActualConfig() CaptureConfig {
+	sr := c.actualSampleRate
+	if sr == 0 {
+		sr = c.cfg.SampleRate
+	}
 	return CaptureConfig{
 		DeviceID:       c.cfg.DeviceID,
-		SampleRate:     c.cfg.SampleRate,
+		SampleRate:     sr,
 		ChannelLeft:    c.cfg.ChannelLeft,
 		ChannelRight:   c.cfg.ChannelRight,
 		BitDepth:       16,
@@ -174,15 +179,17 @@ func (c *ASIOCapturer) Start(ctx context.Context) error {
 		globalASIOCapturer.Store(c)
 
 		sr := C.double(c.cfg.SampleRate)
+		var actualSR C.double
 		t2 := time.Now()
-		if C.asio_start_capture(&channels[0], C.int(len(channels)), prefBuf, sr, &errBuf[0], 256) != 0 {
+		if C.asio_start_capture(&channels[0], C.int(len(channels)), prefBuf, sr, &actualSR, &errBuf[0], 256) != 0 {
 			globalASIOCapturer.Store(nil)
 			errCh <- fmt.Errorf("ASIO-Aufnahme konnte nicht gestartet werden: %s", C.GoString(&errBuf[0]))
 			return
 		}
+		c.actualSampleRate = uint32(actualSR)
 		log.Printf("[asio] start_capture: %v", time.Since(t2).Round(time.Millisecond))
 		log.Printf("[asio] Capture gestartet: channels=%v bufSz=%d sr=%.0f (gesamt: %v)",
-			c.openChs, int(prefBuf), float64(sr), time.Since(t0).Round(time.Millisecond))
+			c.openChs, int(prefBuf), float64(actualSR), time.Since(t0).Round(time.Millisecond))
 		close(errCh)
 
 		go func() {

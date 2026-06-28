@@ -150,3 +150,11 @@ export interface ChartPoint {
 export type ChartHistory = Record<string, { bitrate: ChartPoint[]; listeners: ChartPoint[] }>
 
 export type NavPage = 'streams' | 'aufnahmen' | 'statistiken' | 'protokolle' | 'einstellungen'
+export type AppView = 'streams' | 'fallbacks' | 'settings'
+
+export interface GlobalLogEntry {
+  id:   number
+  time: Date
+  text: string
+  type: 'ok' | 'warn' | 'info'
+}

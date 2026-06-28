@@ -21,7 +21,8 @@ int  asio_get_driver_info(long *numInputCh, double *defSampleRate, char *errBuf,
 int  asio_probe_driver(const char *clsidStr, long *numInputCh, double *sampleRate);
 long asio_get_preferred_buffer_size(void);
 int  asio_start_capture(int *channels, int numChannels, long bufferSize,
-                        double sampleRate, char *errBuf, int errLen);
+                        double sampleRate, double *outActualSampleRate,
+                        char *errBuf, int errLen);
 void asio_stop(void);
 void asio_run_message_pump(void);
 void asio_release_driver(void);

@@ -109,7 +109,7 @@ func onReady() {
 						OnError: func(msg string) {
 							if ws != nil {
 								ws.SendError(p.StreamID, msg)
-								ws.SendStatus(p.StreamID, false, false, 0, 0)
+								// session.runIngest defer already sends (false, false) — don't duplicate
 							}
 						},
 					},
@@ -158,7 +158,7 @@ func onReady() {
 		},
 
 		OnMonitorStopCard: func(monitorID string) {
-			go registry.Unsubscribe(monitorID)
+			go registry.UnsubscribeMonitor(monitorID)
 		},
 
 		OnAsioPanel: func(deviceID string) {
@@ -182,32 +182,26 @@ func onReady() {
 		OnDisconnected: func() {
 			mStatus.SetTitle("Verbinde…")
 		},
-	})
-
-	go ws.Run(ctx)
-
-	// Discover ASIO devices for the tray menu.
-	go func() {
-		devs, err := audio.EnumerateInputDevices()
-		if err != nil {
-			return
-		}
-		var asio []audio.Device
-		for _, d := range devs {
-			if d.API == audio.APIAsio {
-				asio = append(asio, d)
+		OnDevices: func(devs []audio.Device) {
+			var asio []audio.Device
+			for _, d := range devs {
+				if d.API == audio.APIAsio {
+					asio = append(asio, d)
+				}
 			}
-		}
-		if len(asio) > 0 {
 			mu.Lock()
 			asioDevices = asio
 			mu.Unlock()
-			mASIO.Enable()
-			if len(asio) == 1 {
-				mASIO.SetTitle(fmt.Sprintf("ASIO Panel — %s", asio[0].Name))
+			if len(asio) > 0 {
+				mASIO.Enable()
+				if len(asio) == 1 {
+					mASIO.SetTitle(fmt.Sprintf("ASIO Panel — %s", asio[0].Name))
+				}
 			}
-		}
-	}()
+		},
+	})
+
+	go ws.Run(ctx)
 
 	for {
 		select {
