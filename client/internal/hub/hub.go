@@ -132,6 +132,20 @@ func (h *Hub) Unsubscribe(id string) {
 	}
 }
 
+// UnsubscribeMonitor removes a subscriber only if it is a monitor (no stream config).
+// Streaming subscribers with the same ID are left untouched. This prevents a
+// monitor:stop command from cancelling a stream that just started with the same card ID.
+func (h *Hub) UnsubscribeMonitor(id string) {
+	h.mu.Lock()
+	sub, ok := h.subs[id]
+	if !ok || sub.streamCfg != nil {
+		h.mu.Unlock()
+		return
+	}
+	h.mu.Unlock()
+	h.Unsubscribe(id)
+}
+
 // StopMonitors stops all monitor-only subscribers, leaves streams running.
 func (h *Hub) StopMonitors() {
 	h.mu.Lock()
@@ -212,6 +226,13 @@ func (h *Hub) ReopenCapturer() {
 func (h *Hub) addSub(sub *subscriber) error {
 	// Phase 1: register subscriber (concurrent, fast).
 	h.mu.Lock()
+	// A monitor must not displace an active stream with the same ID.
+	// This prevents a concurrent monitor:start from overwriting a stream sub
+	// that was just added, which would cause the stream to lose its session.
+	if existing, ok := h.subs[sub.id]; ok && existing.streamCfg != nil && sub.streamCfg == nil {
+		h.mu.Unlock()
+		return nil
+	}
 	h.subs[sub.id] = sub
 	if h.isASIO {
 		h.openChs = h.computeUnion()
@@ -231,6 +252,18 @@ func (h *Hub) addSub(sub *subscriber) error {
 	defer h.startMu.Unlock()
 
 	h.mu.Lock()
+	// Re-check: our specific sub must still be the current entry for this ID.
+	// A concurrent Unsubscribe or a new StartStream/Subscribe could have removed
+	// or replaced it between Phase 1 and now; bail if so.
+	if h.subs[sub.id] != sub {
+		h.mu.Unlock()
+		return nil
+	}
+	if h.isASIO {
+		// Recompute union in case any concurrent Unsubscribe mutated openChs.
+		h.openChs = h.computeUnion()
+		h.recomputePositions(h.openChs)
+	}
 	currentCap := h.cap
 	currentOpenChs := h.openChs
 	currentCapChs := h.capChs
@@ -572,8 +605,18 @@ func (h *Hub) runLevelDispatch(cap audio.Capturer) {
 }
 
 // launchStreamSub creates the PCMBuffer and StreamSession for a streaming subscriber.
+// Guard: if a concurrent addSub already launched this subscriber (e.g. monitor goroutine
+// called startCapturer while stream goroutine's Phase 1 had already written streamSub to
+// h.subs), skip — startMu serialises callers so this check-under-lock is race-free.
 func (h *Hub) launchStreamSub(s *subscriber, actualSR uint32) {
 	if s.streamCfg == nil {
+		return
+	}
+	h.mu.Lock()
+	alreadyLaunched := s.session != nil
+	h.mu.Unlock()
+	if alreadyLaunched {
+		log.Printf("[hub/%s] launchStreamSub: %s already has session, skipping duplicate", h.deviceID, s.id)
 		return
 	}
 	if actualSR == 0 {

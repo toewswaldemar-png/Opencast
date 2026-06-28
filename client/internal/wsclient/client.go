@@ -53,14 +53,15 @@ type CmdMonitorPayload struct {
 
 // Handlers are the callbacks invoked when the server sends commands.
 type Handlers struct {
-	OnStart        func(CmdStartPayload)
-	OnStop         func(CmdStopPayload)
-	OnMonitorStart     func(CmdMonitorPayload)
-	OnMonitorStop      func()
-	OnMonitorStopCard  func(monitorID string)
-	OnAsioPanel        func(deviceID string)
-	OnConnected    func()
-	OnDisconnected func()
+	OnStart           func(CmdStartPayload)
+	OnStop            func(CmdStopPayload)
+	OnMonitorStart    func(CmdMonitorPayload)
+	OnMonitorStop     func()
+	OnMonitorStopCard func(monitorID string)
+	OnAsioPanel       func(deviceID string)
+	OnConnected       func()
+	OnDisconnected    func()
+	OnDevices         func([]audio.Device) // called after each successful enumeration
 }
 
 // Client manages a persistent WebSocket connection to the server.
@@ -233,6 +234,9 @@ func (c *Client) sendDevices() {
 		devs = []audio.Device{}
 	}
 	c.Send("devices", devs)
+	if c.handlers.OnDevices != nil {
+		c.handlers.OnDevices(devs)
+	}
 }
 
 // SendDevices re-enumerates audio devices and pushes the updated list to the server.

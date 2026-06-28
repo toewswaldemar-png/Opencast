@@ -49,6 +49,27 @@ func (r *Registry) Unsubscribe(id string) {
 	}
 }
 
+// UnsubscribeMonitor removes a monitor-only subscriber from whichever Hub it belongs to.
+// Streaming subscribers with the same ID are left untouched.
+func (r *Registry) UnsubscribeMonitor(id string) {
+	r.mu.Lock()
+	hubs := make([]*Hub, 0, len(r.hubs))
+	for _, h := range r.hubs {
+		hubs = append(hubs, h)
+	}
+	r.mu.Unlock()
+	for _, h := range hubs {
+		h.mu.Lock()
+		sub, found := h.subs[id]
+		isMonitor := found && sub.streamCfg == nil
+		h.mu.Unlock()
+		if isMonitor {
+			h.Unsubscribe(id)
+			return
+		}
+	}
+}
+
 // UnsubscribeExcept removes a subscriber from every Hub except the one for keepDeviceID.
 // Call this before subscribing to a new device so stale cross-hub subscriptions are cleaned up.
 func (r *Registry) UnsubscribeExcept(id, keepDeviceID string) {

@@ -1,25 +1,15 @@
-import { Radio, Plus, Settings2, Mic, MicOff } from 'lucide-react'
-import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
-import {
-  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
-  DropdownMenuItem, DropdownMenuSeparator, DropdownMenuLabel,
-} from '@/components/ui/dropdown-menu'
+import { Radio } from 'lucide-react'
 
 interface Props {
-  streamCount:      number
-  liveCount:        number
-  monitorEnabled:   boolean
-  onAdd:            () => void
-  onOpenSettings:   () => void
-  onToggleMonitor:  () => void
+  streamCount: number
+  liveCount:   number
 }
 
-export default function AppHeader({ streamCount, liveCount, monitorEnabled, onAdd, onOpenSettings, onToggleMonitor }: Props) {
+export default function AppHeader({ streamCount, liveCount }: Props) {
   return (
-    <header className="flex items-center px-4 py-3 border-b border-border bg-card flex-shrink-0">
+    <header className="flex items-center px-4 py-3 border-b border-border bg-gradient-to-r from-blue-600/8 to-indigo-600/5 flex-shrink-0">
       <div className="flex items-center gap-3">
-        <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/40 flex-shrink-0">
+        <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/40 flex-shrink-0">
           <Radio size={17} className="text-white" />
         </div>
         <div>
@@ -33,44 +23,6 @@ export default function AppHeader({ streamCount, liveCount, monitorEnabled, onAd
             )}
           </p>
         </div>
-      </div>
-
-      <div className="ml-auto flex items-center gap-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className={cn(
-            'h-8 w-8',
-            monitorEnabled
-              ? 'text-teal-600 hover:text-teal-700'
-              : 'text-muted-foreground hover:text-foreground',
-          )}
-          onClick={onToggleMonitor}
-          title={monitorEnabled ? 'Monitor aktiv — klicken zum Deaktivieren' : 'Monitor aus — klicken zum Aktivieren'}
-        >
-          {monitorEnabled ? <Mic size={15} /> : <MicOff size={15} />}
-        </Button>
-
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground">
-              <Settings2 size={15} />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel>Streams</DropdownMenuLabel>
-            <DropdownMenuItem onClick={onAdd}>
-              <Plus size={13} />
-              Stream hinzufügen
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Einstellungen</DropdownMenuLabel>
-            <DropdownMenuItem onClick={onOpenSettings}>
-              <Settings2 size={13} />
-              Globale Einstellungen
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
       </div>
     </header>
   )

@@ -217,7 +217,8 @@ long asio_get_preferred_buffer_size(void) {
 }
 
 int asio_start_capture(int *channels, int numChannels, long bufferSize,
-                       double sampleRate, char *errBuf, int errLen) {
+                       double sampleRate, double *outActualSampleRate,
+                       char *errBuf, int errLen) {
     if (!g_asio) { snprintf(errBuf, errLen, "kein Treiber geoeffnet"); return -1; }
     if (numChannels > MAX_ASIO_CHANNELS / 2) numChannels = MAX_ASIO_CHANNELS / 2;
 
@@ -242,6 +243,7 @@ int asio_start_capture(int *channels, int numChannels, long bufferSize,
             g_asio->setSampleRate(actualSR);
         }
     }
+    if (outActualSampleRate) *outActualSampleRate = actualSR;
 
     // Input channels
     memset(g_bufInfos, 0, sizeof(g_bufInfos));

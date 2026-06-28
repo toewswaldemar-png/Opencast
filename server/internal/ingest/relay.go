@@ -43,7 +43,8 @@ type activeStream struct {
 	cfg          StreamConfig
 	startedAt    time.Time
 	bytesSent    int64
-	reconnecting bool // protected by relay mu
+	reconnecting bool      // protected by relay mu
+	stopCh       chan struct{} // closed by Unregister to abort reconnect loop
 }
 
 func NewRelay() *Relay {
@@ -104,6 +105,12 @@ func (r *Relay) Unregister(streamID string) {
 	as := r.active[streamID]
 	r.mu.Unlock()
 	if as != nil {
+		select {
+		case <-as.stopCh:
+			// already closed (double-stop), nothing to do
+		default:
+			close(as.stopCh)
+		}
 		as.ice.Disconnect()
 	}
 }
@@ -191,7 +198,7 @@ func (r *Relay) HandleIngest(w http.ResponseWriter, req *http.Request) {
 	}
 	log.Printf("[ingest/%s] Icecast connect: %v", streamID, time.Since(t1).Round(time.Millisecond))
 
-	as := &activeStream{ice: ice, cfg: cfg, startedAt: time.Now()}
+	as := &activeStream{ice: ice, cfg: cfg, startedAt: time.Now(), stopCh: make(chan struct{})}
 	r.mu.Lock()
 	r.active[streamID] = as
 	r.mu.Unlock()
@@ -236,6 +243,12 @@ func (r *Relay) HandleIngest(w http.ResponseWriter, req *http.Request) {
 	retryDelay := time.Second
 	writeChunk := func(chunk []byte) bool {
 		for {
+			select {
+			case <-as.stopCh:
+				return false
+			default:
+			}
+
 			_, writeErr := ice.Write(chunk)
 			if writeErr == nil {
 				r.mu.Lock()
@@ -282,6 +295,8 @@ func (r *Relay) HandleIngest(w http.ResponseWriter, req *http.Request) {
 			select {
 			case <-time.After(retryDelay):
 			case <-req.Context().Done():
+				return false
+			case <-as.stopCh:
 				return false
 			}
 			if retryDelay < 30*time.Second {
