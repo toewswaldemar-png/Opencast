@@ -113,8 +113,3 @@ Cache wird bei jedem erfolgreichen Open aktualisiert.
 ### Winsock-Include-Reihenfolge in asio_host.cpp
 `#include <winsock2.h>` MUSS vor `#include <windows.h>` stehen.
 
-## Offene Themen / nächste Schritte
-- CPU-Last mit ASIO im Monitor-Modus getestet? (War ~22% vor der zero-alloc-Optimierung)
-- Streaming-Modus mit ASIO testen (hasPCMSpace=true Pfad)
-- Eventuell: `asio_buffer_switch_time_info` ruft `asio_buffer_switch` auf → doppelter CGO-Übergang
-  (in asio_host.cpp, nicht kritisch solange CPU stimmt)

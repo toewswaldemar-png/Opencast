@@ -1,0 +1,7 @@
+client/
+server/dist/
+frontend/node_modules/
+frontend/dist/
+*.log
+*.exe
+data/

@@ -1,0 +1,12 @@
+services:
+  opencast-server:
+    build: .
+    container_name: opencast-server
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data/config:/config
+    environment:
+      PORT: "8765"
+      # BASE_URL: "http://192.168.1.x:8765"
+    restart: unless-stopped
