@@ -12,7 +12,7 @@ WORKDIR /app/server
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
-COPY --from=frontend /app/frontend/dist ./dist
+COPY --from=frontend /app/server/dist ./dist
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o opencast-server .
 
 # Stage 3: Finales Image

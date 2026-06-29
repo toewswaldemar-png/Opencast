@@ -29,9 +29,6 @@ jobs:
         working-directory: frontend
         run: npm ci && npm run build
 
-      - name: Copy frontend dist to server
-        run: cp -r frontend/dist server/dist
-
       - name: Build server (Linux)
         working-directory: server
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o opencast-server-linux-amd64 .
