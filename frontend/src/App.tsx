@@ -130,9 +130,11 @@ export default function App() {
       if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error ?? `HTTP ${res.status}`) }
       const data: AudioDevice[] = await res.json()
       setDevices(data)
-      if (!selectedDeviceRef.current) {
-        const first = data.find((d) => d.state === 'active') ?? data[0]
-        if (first) setSelectedDevice(first.id)
+      const firstActive = data.find((d) => d.state === 'active') ?? data[0]
+      if (firstActive && !selectedDeviceRef.current) {
+        setSelectedDevice(firstActive.id)
+        // Auch Karten ohne explizites deviceId direkt befüllen
+        setServers(prev => prev.map(s => s.deviceId ? s : { ...s, deviceId: firstActive.id }))
       }
     } catch (err) {
       setDevicesError(err instanceof Error ? err.message : 'Fehler beim Laden')
@@ -140,6 +142,7 @@ export default function App() {
   }, [])
 
   useEffect(() => { fetchDevices() }, [fetchDevices])
+  useEffect(() => { if (clientConnected) fetchDevices() }, [clientConnected]) // eslint-disable-line
 
   const labelFor = useCallback((id: string) =>
     serversRef.current.find(s => s.id === id)?.label ?? id.slice(0, 8), [])
@@ -392,11 +395,6 @@ export default function App() {
   const removeServer = (id: string) => {
     if (allStatuses[id]) return
     if (servers.length <= 1) return
-    apiFetch('/api/monitor/stop', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ monitorId: id }),
-    }).catch(() => {})
     setServers((ss) => {
       const next = ss.filter((s) => s.id !== id)
       if (selectedCardId === id) setSelectedCardId(next[0]?.id ?? null)

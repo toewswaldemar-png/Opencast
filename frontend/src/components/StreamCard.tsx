@@ -160,6 +160,8 @@ function StreamCard({
   const [nowPlaying, setNowPlaying] = useState('')
   const metaTimerRef                = useRef<number | null>(null)
 
+  useEffect(() => () => { if (metaTimerRef.current) clearTimeout(metaTimerRef.current) }, [])
+
   const handleNowPlayingChange = (val: string) => {
     setNowPlaying(val)
     if (metaTimerRef.current) clearTimeout(metaTimerRef.current)

@@ -11,6 +11,8 @@ export function useWebSocket(onMessage: MessageHandler, onDisconnect?: () => voi
   const disconnectRef = useRef(onDisconnect)
   disconnectRef.current = onDisconnect
 
+  const mountedRef = useRef(true)
+
   const connect = useCallback(() => {
     const ws = new WebSocket(wsUrl('/ws'))
     wsRef.current = ws
@@ -26,9 +28,10 @@ export function useWebSocket(onMessage: MessageHandler, onDisconnect?: () => voi
 
     ws.onclose = () => {
       wsRef.current = null
+      if (!mountedRef.current) return
       disconnectRef.current?.()
       setTimeout(() => {
-        if (wsRef.current === null) connect()
+        if (mountedRef.current && wsRef.current === null) connect()
       }, 2000)
     }
 
@@ -38,8 +41,10 @@ export function useWebSocket(onMessage: MessageHandler, onDisconnect?: () => voi
   }, [])
 
   useEffect(() => {
+    mountedRef.current = true
     connect()
     return () => {
+      mountedRef.current = false
       const ws = wsRef.current
       if (ws) {
         wsRef.current = null
