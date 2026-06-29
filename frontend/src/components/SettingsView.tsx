@@ -24,7 +24,7 @@ export default function SettingsView({ autoReconnect, vuDecayMs, onReconnectChan
     <div className="flex-1 overflow-y-auto p-6">
       <div className="max-w-sm mx-auto flex flex-col gap-6">
         <div>
-          <h2 className="text-sm font-semibold text-foreground mb-4">App-Einstellungen</h2>
+          <h2 className="text-sm font-semibold text-foreground mb-4">Einstellungen</h2>
 
           {/* Verbindung */}
           <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-3">Verbindung</p>
@@ -59,6 +59,12 @@ export default function SettingsView({ autoReconnect, vuDecayMs, onReconnectChan
               </SelectContent>
             </Select>
           </div>
+        </div>
+        <Separator />
+
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-3">Fallbacks</p>
+          <p className="text-xs text-muted-foreground">In Entwicklung</p>
         </div>
       </div>
     </div>

@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import { Mic, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ServerEntry, StreamStatus, EncoderConfig } from '../types'
 import { apiFetch } from '../lib/api'
+import { subscribeRAF } from '../lib/rafScheduler'
 import { Button }    from '@/components/ui/button'
-import { Separator } from '@/components/ui/separator'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -21,28 +21,10 @@ function formatUptime(ns: number): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
 }
 
-interface LogLine {
-  id:   number
-  time: Date
-  text: string
-  type: 'ok' | 'warn' | 'info' | 'error'
-}
-
-function humanizeError(raw: string): string {
-  if (raw.includes('read/write on closed pipe')) return 'Verbindung unerwartet getrennt'
-  if (raw.includes('HTTP 409'))        return 'Icecast: Mount bereits belegt'
-  if (raw.includes('HTTP 404'))        return 'Stream nicht registriert'
-  if (raw.includes('HTTP 401'))        return 'Icecast: Falsches Passwort'
-  if (raw.includes('HTTP 403'))        return 'Icecast: Zugriff verweigert'
-  if (raw.includes('connection refused')) return 'Server nicht erreichbar'
-  if (raw.includes('dial tcp'))        return 'Server nicht erreichbar'
-  if (raw.includes('no such host'))    return 'Host nicht gefunden'
-  if (raw.includes('i/o timeout') || raw.includes('timeout')) return 'Verbindungs-Timeout'
-  if (raw.includes('EOF'))             return 'Verbindung unterbrochen'
-  return raw
-}
-function fmtLogTime(d: Date): string {
-  return d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`
+  if (bytes >= 1_000)     return `${Math.round(bytes / 1_000)} KB`
+  return `${bytes} B`
 }
 
 // ── Status badge ──────────────────────────────────────────────────────────────
@@ -64,8 +46,8 @@ function StatusBadge({ isLive, isReconnecting, isConnecting }: { isLive: boolean
     </span>
   )
   return (
-    <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground flex-shrink-0">
-      <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/60" />Offline
+    <span className="flex items-center gap-1.5 text-[11px] font-medium text-red-500 flex-shrink-0">
+      <span className="w-1.5 h-1.5 rounded-full bg-red-400" />Offline
     </span>
   )
 }
@@ -107,8 +89,7 @@ function VUMeter({ vuTargetRef, vuDecayMsRef }: VUMeterProps) {
   const prevTsRef  = useRef(0)
 
   useEffect(() => {
-    let rafId: number
-    const loop = (ts: number) => {
+    return subscribeRAF((ts) => {
       const dt   = prevTsRef.current ? ts - prevTsRef.current : 16
       prevTsRef.current = ts
       const tgt  = vuTargetRef.current
@@ -123,14 +104,11 @@ function VUMeter({ vuTargetRef, vuDecayMsRef }: VUMeterProps) {
         if (labelLRef.current) labelLRef.current.textContent = newL <= DB_MIN ? '−60' : newL.toFixed(0)
         if (labelRRef.current) labelRRef.current.textContent = newR <= DB_MIN ? '−60' : newR.toFixed(0)
       }
-      rafId = requestAnimationFrame(loop)
-    }
-    rafId = requestAnimationFrame(loop)
-    return () => cancelAnimationFrame(rafId)
+    })
   }, []) // eslint-disable-line
 
   return (
-    <div className="px-4 pb-4 flex flex-col gap-1.5">
+    <div className="px-3 pb-2 flex flex-col gap-1">
       {(['L', 'R'] as const).map((ch) => (
         <div key={ch} className="flex items-center gap-2">
           <span className="text-[10px] font-bold text-muted-foreground/80 w-3 select-none">{ch}</span>
@@ -175,36 +153,12 @@ interface Props {
 
 // ── Main Card ─────────────────────────────────────────────────────────────────
 
-export default function StreamCard({
+function StreamCard({
   entry, status, vuTargetRef, vuDecayMsRef, encoderConfig,
   isLoading, error, isSelected, onStart, onStop, onSelect,
 }: Props) {
-  const [log, setLog]               = useState<LogLine[]>([])
   const [nowPlaying, setNowPlaying] = useState('')
-  const logIdRef                    = useRef(0)
-  const prevStatusRef               = useRef<StreamStatus | null>(null)
   const metaTimerRef                = useRef<number | null>(null)
-
-  useEffect(() => {
-    if (error) {
-      console.error(`[stream/${entry.id}]`, error)
-      setLog((l) => [...l.slice(-9), { id: logIdRef.current++, time: new Date(), text: humanizeError(error), type: 'error' }])
-    }
-  }, [error]) // eslint-disable-line
-
-  useEffect(() => {
-    const prev = prevStatusRef.current
-    const curr = status
-    const add = (text: string, type: LogLine['type']) =>
-      setLog((l) => [...l.slice(-9), { id: logIdRef.current++, time: new Date(), text, type }])
-
-    if      (curr?.connected  && !prev?.connected)                add('Verbunden', 'ok')
-    else if (!curr?.connected && prev?.connected && curr?.running) add('Verbindung unterbrochen', 'warn')
-    else if (curr?.reconnecting && !prev?.reconnecting)            add('Verbindungsversuch…', 'info')
-    else if (prev?.running && !curr?.running)                      add('Getrennt', 'info')
-
-    prevStatusRef.current = curr
-  }, [status]) // eslint-disable-line
 
   const handleNowPlayingChange = (val: string) => {
     setNowPlaying(val)
@@ -240,31 +194,32 @@ export default function StreamCard({
   return (
     <div
       className={cn(
-        'flex flex-col rounded-xl border-2 bg-card overflow-hidden transition-all duration-200 cursor-pointer isolate',
-        isLive           ? 'border-emerald-400 shadow-lg shadow-emerald-500/15'
-        : isReconnecting ? 'border-amber-400'
-        : isConnecting   ? 'border-blue-400'
-        :                  'border-indigo-200',
-        isSelected     ? 'ring-2 ring-blue-400/50 z-10' : 'z-0',
+        'flex flex-col rounded-xl overflow-hidden transition-all duration-200 cursor-pointer isolate',
+        isSelected ? 'z-10' : 'z-0',
       )}
+      style={{
+        background: '#ffffff',
+        border: 'none',
+        boxShadow: isSelected && (isLive || isConnecting)
+          ? '0 0 0 3px rgba(52,211,153,0.7), 0 4px 12px rgba(0,0,0,0.10)'
+          : isSelected
+          ? '0 0 0 3px rgba(37,99,235,0.7), 0 4px 12px rgba(0,0,0,0.10)'
+          : (isLive || isConnecting)
+          ? '0 2px 8px rgba(52,211,153,0.2), 0 1px 3px rgba(0,0,0,0.06)'
+          : '0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04)',
+      }}
       onClick={onSelect}
     >
 
       {/* ── Header ── */}
-      <div className={cn(
-        'flex items-center gap-3 px-4 pt-4 pb-3 border-b',
-        isLive           ? 'bg-emerald-50 border-b-emerald-200/80'
-        : isReconnecting ? 'bg-amber-50 border-b-amber-200/80'
-        : isConnecting   ? 'bg-blue-50 border-b-blue-200/80'
-        :                  'bg-indigo-50/60 border-b-indigo-100',
-      )}>
+      <div className="flex items-center gap-3 px-3 pt-3 pb-2" style={{borderBottom: '1px solid rgba(0,0,0,0.06)'}}>
         <div className={cn(
-          'w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0',
-          isLive           ? 'bg-emerald-500/10 text-emerald-600'
-          : isReconnecting ? 'bg-amber-500/10 text-amber-600'
-          : isConnecting   ? 'bg-blue-500/10 text-blue-500'
-          :                  'bg-indigo-100 text-indigo-500',
-        )}>
+          'w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0',
+          isLive           ? 'text-emerald-600'
+          : isReconnecting ? 'text-amber-500'
+          : isConnecting   ? 'text-blue-500'
+          :                  'text-slate-400',
+        )} style={{background: 'rgba(255,255,255,0.5)'}}>
           <Mic size={15} />
         </div>
         <div className="flex-1 min-w-0">
@@ -277,9 +232,9 @@ export default function StreamCard({
       </div>
 
       {/* ── Body: always status view ── */}
-      <div className="min-h-[224px]">
+      <div className="flex-1 flex flex-col">
         {/* Now Playing / Metadata */}
-        <div className="flex items-center gap-2 px-4 py-3">
+        <div className="flex items-center gap-2 px-3 py-2">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="text-muted-foreground/50 flex-shrink-0">
             <circle cx="12" cy="12" r="2"/>
             <path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"/>
@@ -308,7 +263,7 @@ export default function StreamCard({
         <VUMeter vuTargetRef={vuTargetRef} vuDecayMsRef={vuDecayMsRef} />
 
         {/* Stats */}
-        <div className="grid grid-cols-3 border-t border-border">
+        <div className="grid grid-cols-3 flex-1" style={{borderTop: '1px solid rgba(0,0,0,0.06)'}}>
           {([
             {
               icon:   'clock',
@@ -316,7 +271,6 @@ export default function StreamCard({
               value:  status?.uptime ? formatUptime(status.uptime) : '00:00:00',
               mono:   true,
               accent: isLive,
-              bg:     isLive ? 'bg-blue-50' : 'bg-blue-50/40',
             },
             {
               icon:   'users',
@@ -324,22 +278,18 @@ export default function StreamCard({
               value:  isLive && status?.listeners != null ? String(status.listeners) : '—',
               mono:   false,
               accent: false,
-              bg:     isLive ? 'bg-emerald-50' : 'bg-emerald-50/40',
             },
             {
               icon:   'activity',
-              label:  'BITRATE',
-              value:  status?.bitrate ? `${status.bitrate}K` : '—',
-              mono:   false,
+              label:  'GESENDET',
+              value:  isLive && status?.bytesSent ? formatBytes(status.bytesSent) : '—',
+              mono:   true,
               accent: false,
-              bg:     isLive ? 'bg-violet-50' : 'bg-violet-50/40',
             },
-          ]).map(({ icon, label, value, mono, accent, bg }, i) => (
+          ]).map(({ icon, label, value, mono, accent }, i) => (
             <div key={label} className={cn(
-              'flex flex-col items-center py-3 gap-1 transition-colors',
-              i > 0 && 'border-l border-border',
-              bg,
-            )}>
+              'flex flex-col items-center py-2 gap-0.5 transition-colors',
+            )} style={i > 0 ? {borderLeft: '1px solid rgba(0,0,0,0.06)'} : {}}>
               <StatIcon name={icon} accent={accent} />
               <span className={cn('text-sm font-bold', mono && 'font-mono', accent ? 'text-blue-600' : 'text-foreground')}>
                 {value}
@@ -349,32 +299,10 @@ export default function StreamCard({
           ))}
         </div>
 
-        {/* Mini-Log */}
-        <div className="px-4 py-2.5 border-t border-border/60 flex flex-col gap-1 h-[72px] overflow-hidden">
-          {[...log].reverse().slice(0, 3).map((entry) => (
-            <div key={entry.id} className="flex items-center gap-2 text-[10px] font-mono">
-              <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0',
-                entry.type === 'ok'    ? 'bg-emerald-500' :
-                entry.type === 'warn'  ? 'bg-amber-500'   :
-                entry.type === 'error' ? 'bg-red-500'     : 'bg-muted-foreground/40'
-              )} />
-              <span className="text-muted-foreground">{fmtLogTime(entry.time)}</span>
-              <span className={cn(
-                entry.type === 'ok'    ? 'text-emerald-700' :
-                entry.type === 'warn'  ? 'text-amber-700'   :
-                entry.type === 'error' ? 'text-red-600'     : 'text-muted-foreground'
-              )}>{entry.text}</span>
-            </div>
-          ))}
-          {log.length === 0 && (
-            <span className="text-[10px] text-muted-foreground/60 font-mono">—</span>
-          )}
-        </div>
       </div>
 
       {/* ── Footer ── */}
-      <Separator />
-      <div className="p-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      <div className="p-2 flex items-center gap-2" style={{borderTop: '1px solid rgba(0,0,0,0.06)'}} onClick={(e) => e.stopPropagation()}>
         {!status?.running ? (
           <Button variant="default" className="flex-1" onClick={onStart} disabled={isLoading}>
             <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M5 3l14 9-14 9V3z"/></svg>
@@ -396,3 +324,12 @@ export default function StreamCard({
     </div>
   )
 }
+
+export default memo(StreamCard, (prev, next) =>
+  prev.entry        === next.entry        &&
+  prev.status       === next.status       &&
+  prev.isLoading    === next.isLoading    &&
+  prev.error        === next.error        &&
+  prev.isSelected   === next.isSelected   &&
+  prev.encoderConfig === next.encoderConfig
+)

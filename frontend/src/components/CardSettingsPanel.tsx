@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { RefreshCw, Settings2, AlertCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -26,6 +26,47 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
+// ── Password Input ────────────────────────────────────────────────────────────
+
+function PasswordInput({ value, onChange, disabled }: {
+  value:    string
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void
+  disabled: boolean
+}) {
+  const [show, setShow] = useState(false)
+  return (
+    <div className="relative">
+      <Input
+        type={show ? 'text' : 'password'}
+        value={value}
+        onChange={onChange}
+        disabled={disabled}
+        placeholder="Quellpasswort"
+        className="h-7 text-xs pr-7"
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        onClick={() => setShow(v => !v)}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {show ? (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+            <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+            <line x1="1" y1="1" x2="23" y2="23"/>
+          </svg>
+        ) : (
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        )}
+      </button>
+    </div>
+  )
+}
+
 // ── Tab: Server ───────────────────────────────────────────────────────────────
 
 function ServerTab({
@@ -38,6 +79,7 @@ function ServerTab({
 }) {
   return (
     <div className="p-3 flex flex-col gap-2.5">
+      <p className="text-xs font-semibold text-foreground text-center truncate">{entry.label}</p>
       <div className="flex items-center gap-2">
         {(['icecast2', 'shoutcast'] as const).map((p) => (
           <Button key={p} size="xs" variant={entry.config.protocol === p ? 'default' : 'outline'}
@@ -77,9 +119,9 @@ function ServerTab({
             disabled={disabled} placeholder="source" className="h-7 text-xs font-mono" />
         </Field>
         <Field label="Passwort">
-          <Input type="password" value={entry.config.password}
+          <PasswordInput value={entry.config.password}
             onChange={(e) => onChange({ password: e.target.value })}
-            disabled={disabled} placeholder="Quellpasswort" className="h-7 text-xs" />
+            disabled={disabled} />
         </Field>
       </div>
     </div>
@@ -90,39 +132,21 @@ function ServerTab({
 
 function AudioTab({
   selectedDevice, encoderConfig, disabled, onDeviceChange, onEncoderChange,
+  devices, devicesLoading, devicesError, onRefreshDevices,
 }: {
-  selectedDevice:  string
-  encoderConfig:   EncoderConfig
-  disabled:        boolean
-  onDeviceChange:  (id: string) => void
-  onEncoderChange: (p: Partial<EncoderConfig>) => void
+  selectedDevice:   string
+  encoderConfig:    EncoderConfig
+  disabled:         boolean
+  onDeviceChange:   (id: string) => void
+  onEncoderChange:  (p: Partial<EncoderConfig>) => void
+  devices:          AudioDevice[]
+  devicesLoading:   boolean
+  devicesError:     string | null
+  onRefreshDevices: () => void
 }) {
-  const [devices, setDevices]           = useState<AudioDevice[]>([])
-  const [loading, setLoading]           = useState(false)
-  const [error, setError]               = useState<string | null>(null)
   const [panelOpening, setPanelOpening] = useState(false)
-  const selectedDeviceRef               = useRef(selectedDevice)
-  selectedDeviceRef.current             = selectedDevice
   const selected      = devices.find((d) => d.id === selectedDevice)
   const activeDevices = devices.filter((d) => d.state === 'active')
-
-  const fetchDevices = async () => {
-    setLoading(true); setError(null)
-    try {
-      const res = await apiFetch('/api/devices')
-      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error ?? `HTTP ${res.status}`) }
-      const data: AudioDevice[] = await res.json()
-      setDevices(data)
-      if (!selectedDeviceRef.current) {
-        const first = data.find((d) => d.state === 'active') ?? data[0]
-        if (first) onDeviceChange(first.id)
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Fehler beim Laden')
-    } finally { setLoading(false) }
-  }
-
-  useEffect(() => { fetchDevices() }, []) // eslint-disable-line
 
   const openAsioPanel = async () => {
     if (!selected || selected.api !== 'ASIO') return
@@ -138,11 +162,11 @@ function AudioTab({
   return (
     <div className="p-3 flex flex-col gap-2.5">
       <Field label="Audiogerät">
-        <div className="flex gap-2">
+        <div className="flex gap-1.5 items-center">
           <Select value={selectedDevice} onValueChange={onDeviceChange}
-            disabled={disabled || loading || activeDevices.length === 0}>
-            <SelectTrigger className="flex-1 h-7 text-xs">
-              <SelectValue placeholder={loading ? 'Lade Geräte…' : '— Kein Gerät —'} />
+            disabled={disabled || devicesLoading || activeDevices.length === 0}>
+            <SelectTrigger className="min-w-0 flex-1 h-7 text-xs">
+              <SelectValue placeholder={devicesLoading ? 'Lade Geräte…' : '— Kein Gerät —'} />
             </SelectTrigger>
             <SelectContent>
               {activeDevices.map((d) => (
@@ -152,14 +176,14 @@ function AudioTab({
               ))}
             </SelectContent>
           </Select>
-          <Button variant="outline" size="icon" className="h-7 w-7 flex-shrink-0"
-            onClick={fetchDevices} disabled={loading || disabled} title="Geräte neu laden">
-            <RefreshCw size={11} className={loading ? 'animate-spin' : ''} />
+          <Button variant="outline" size="icon" className="h-7 w-7 flex-none"
+            onClick={onRefreshDevices} disabled={devicesLoading || disabled} title="Geräte neu laden">
+            <RefreshCw size={11} className={devicesLoading ? 'animate-spin' : ''} />
           </Button>
         </div>
-        {error && (
+        {devicesError && (
           <div className="flex items-center gap-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2 mt-1">
-            <AlertCircle size={12} className="flex-shrink-0" />{error}
+            <AlertCircle size={12} className="flex-shrink-0" />{devicesError}
           </div>
         )}
         {selected && (
@@ -334,55 +358,84 @@ function EncoderTab({ encoderConfig, disabled, onEncoderChange }: {
 // ── Main Export ───────────────────────────────────────────────────────────────
 
 export interface CardSettingsPanelProps {
-  entry:           ServerEntry
-  encoderConfig:   EncoderConfig
-  selectedDevice:  string
-  disabled:        boolean
-  onChange:        (p: Partial<ServerConfig>) => void
-  onLabelChange:   (l: string) => void
-  onDeviceChange:  (id: string) => void
-  onEncoderChange: (p: Partial<EncoderConfig>) => void
+  entry:            ServerEntry
+  encoderConfig:    EncoderConfig
+  selectedDevice:   string
+  disabled:         boolean
+  devices:          AudioDevice[]
+  devicesLoading:   boolean
+  devicesError:     string | null
+  onRefreshDevices: () => void
+  onChange:         (p: Partial<ServerConfig>) => void
+  onLabelChange:    (l: string) => void
+  onDeviceChange:   (id: string) => void
+  onEncoderChange:  (p: Partial<EncoderConfig>) => void
+  onRemove?:        () => void
+  canRemove?:       boolean
 }
 
-function AccordionCard({ label, defaultOpen = true, children }: { label: string; defaultOpen?: boolean; children: React.ReactNode }) {
-  const [open, setOpen] = useState(defaultOpen)
+function SectionCard({ children }: { children: React.ReactNode }) {
   return (
-    <div className="mx-3 my-2 rounded-lg border border-border bg-background overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setOpen(v => !v)}
-        className="w-full flex items-center justify-between px-3 py-1.5 bg-muted/40 hover:bg-muted/60 transition-colors"
-      >
-        <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</span>
-        <svg
-          width="12" height="12" viewBox="0 0 24 24" fill="none"
-          stroke="currentColor" strokeWidth="2.5"
-          className={cn('text-muted-foreground transition-transform duration-200', open ? 'rotate-180' : 'rotate-0')}
+    <div className="mx-3 my-2 rounded-lg bg-background overflow-hidden">
+      {children}
+    </div>
+  )
+}
+
+function DeleteButton({ onRemove, canRemove }: { onRemove: () => void; canRemove: boolean }) {
+  const [confirm, setConfirm] = useState(false)
+  return (
+    <div className="mx-3 my-2 rounded-lg bg-slate-100/80">
+      {!confirm ? (
+        <button
+          className="w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-md text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed text-destructive hover:bg-destructive/10 disabled:hover:bg-transparent"
+          onClick={() => setConfirm(true)}
+          disabled={!canRemove}
         >
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
-      </button>
-      {open && <div className="border-t border-border">{children}</div>}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+          </svg>
+          Stream löschen
+        </button>
+      ) : (
+        <div className="w-full flex items-center justify-center gap-4 px-3 py-1.5">
+          <button
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            onClick={() => setConfirm(false)}
+          >Abbrechen</button>
+          <button
+            className="text-xs font-medium text-destructive hover:underline transition-colors"
+            onClick={() => { onRemove(); setConfirm(false) }}
+          >Löschen</button>
+        </div>
+      )}
     </div>
   )
 }
 
 export default function CardSettingsPanel({
   entry, encoderConfig, selectedDevice, disabled,
+  devices, devicesLoading, devicesError, onRefreshDevices,
   onChange, onLabelChange, onDeviceChange, onEncoderChange,
+  onRemove, canRemove,
 }: CardSettingsPanelProps) {
   return (
     <div className="flex-1 overflow-y-auto py-1">
-      <AccordionCard label="Server">
+      <SectionCard>
         <ServerTab entry={entry} disabled={disabled} onChange={onChange} onLabelChange={onLabelChange} />
-      </AccordionCard>
-      <AccordionCard label="Audio">
+      </SectionCard>
+      <SectionCard>
         <AudioTab selectedDevice={selectedDevice} encoderConfig={encoderConfig}
-          disabled={disabled} onDeviceChange={onDeviceChange} onEncoderChange={onEncoderChange} />
-      </AccordionCard>
-      <AccordionCard label="Encoder">
+          disabled={disabled} onDeviceChange={onDeviceChange} onEncoderChange={onEncoderChange}
+          devices={devices} devicesLoading={devicesLoading} devicesError={devicesError}
+          onRefreshDevices={onRefreshDevices} />
+      </SectionCard>
+      <SectionCard>
         <EncoderTab encoderConfig={encoderConfig} disabled={disabled} onEncoderChange={onEncoderChange} />
-      </AccordionCard>
+      </SectionCard>
+      {onRemove && !disabled && (
+        <DeleteButton onRemove={onRemove} canRemove={canRemove ?? true} />
+      )}
     </div>
   )
 }
