@@ -46,7 +46,7 @@ Im Docker-Tab manuell anlegen oder per **Compose Manager** (Community Applicatio
 
 | Feld | Wert |
 |---|---|
-| Image | `ghcr.io/toewswaldemar-png/opencast:main` |
+| Image | `ghcr.io/toewswaldemar-png/opencast:latest` |
 | Port | `8765 → 8765` |
 | Volume | `/mnt/user/appdata/opencast/config → /config` |
 | Env | `PORT=8765` |
