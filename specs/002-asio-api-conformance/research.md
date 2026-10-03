@@ -40,7 +40,7 @@ Er enthält aber die Dokumentation mit dem Hinweis "Release #4" und der Lizenz v
 ## Was die Referenz-Hosts zusätzlich zeigen
 | Thema | SDK-Hostsample | PortAudio | JUCE |
 |---|---|---|---|
-| `kAsioResetRequest` | setzt Stopp-Flag, kehrt mit 1 zurück | — (Implementierung nicht ausgewertet) | **Timer 500 ms**, dann Neustart; nicht während Control-Panel |
+| `kAsioResetRequest` | setzt Stopp-Flag, kehrt mit 1 zurück | **nur `return 1`, Aktion fehlt** (Ticket #108; siehe 003) | **Timer 500 ms**, dann Neustart; nicht während Control-Panel |
 | `BufferSizeChange` / `Resync` | Resync: 1 | — | beide → gleicher deferred Reset |
 | `sampleRateDidChange` | leerer Handler | — | → Reset-Request |
 | `kAsioSelectorSupported` | Reset, Engine, Resync, Latencies, TimeInfo, TimeCode, InputMonitor | — | Reset, Engine, Resync, Latencies, InputMonitor, **Overload** |
@@ -66,5 +66,5 @@ daher kein Befund erster Ordnung. Das 3-s-Watchdog-Muster entspricht JUCE (Openc
 
 ## Lücken dieser Recherche
 - Kein Zugriff auf Steinberg-Webseite und die *Usage Guidelines* (PDF, nicht ausgewertet).
-- PortAudio-`asioMessages`-Funktionskörper nicht ausgewertet (Datei beim Abruf gekürzt); JUCE-Angaben stammen aus einer Zusammenfassung des Quelltextes, nicht aus eigenem Zeilenlesen.
+- PortAudio-`asioMessages` wurde inzwischen im Quelltext gelesen (siehe `specs/003-ardour-asio-review/research.md`): Reset wird nur mit 1 bestätigt, Overload fehlt. JUCE-Angaben stammen aus einer Zusammenfassung des Quelltextes, nicht aus eigenem Zeilenlesen.
 - Kein Zugriff auf echte Treiber; Aussagen zu ReaRoute-Verhalten stammen aus `CLAUDE.md` und Code-Kommentaren.
