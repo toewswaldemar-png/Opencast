@@ -12,7 +12,7 @@
 - [ ] T010 [US1] Test: Mono-Union (1 Kanal) liefert nach Hub-Extraktion dieselbe Frame-Zahl wie der Treiber (`client/internal/hub/hub_test.go`, rot vor Fix) [F-01]
 - [ ] T011 [US1] Fix: Bridge liefert im Fan-Out-Pfad immer `nCh` interleaved Kanäle (keine Expansion); Expansion nur im `OutputCh`-Legacy-Pfad oder entfernen; Vertrag in `types.go` präzisieren [F-01]
 - [ ] T012 [US1] Kanal-Validierung: out-of-range → Fehler, keine Duplikate, `openChs` = tatsächlich geöffnete Kanäle (`capturer_asio.go:140-177`) [F-04]
-- [ ] T013 [US1] `asio_host.cpp`: unbekannte Sample-Typen in `asio_start_capture` ablehnen; fehlende Typen ergänzen (Int32LSB16/18/20/24, Int24MSB, Float32MSB, Float64MSB); Typ je Kanal prüfen [F-02]
+- [ ] T013 [US1] `asio_host.cpp`: unbekannte Sample-Typen in `asio_start_capture` ablehnen; fehlende Typen ergänzen (Int32LSB16/18/20/24, Int24MSB, Float32MSB, Float64MSB); Typ je Kanal prüfen [F-02] — **Detail und Referenzwerte siehe `specs/002-asio-api-conformance/tasks.md` (T201/T202/T211)**
 - [ ] T014 [P] [US1] Tabellentest für `sampleToI16` gegen Referenzwerte, C++-Implementierung 1:1 spiegeln [F-02]
 
 ## Phase 3: US3 — Geräteliste (P2)

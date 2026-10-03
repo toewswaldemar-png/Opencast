@@ -41,6 +41,17 @@ nicht zu stillem Stillstand oder unbegrenztem Restart-Sturm.
 Logik an der Grenze (Mono-Expansion, Kanal-Mapping, Sample-Konvertierung, Channel-Union)
 liegt in reinen, ohne Treiber testbaren Funktionen. CI baut nicht nur, sondern vettet und testet.
 
+### VIII. Die offizielle ASIO-Spezifikation ist normativ
+Referenz: *Steinberg ASIO SDK 2.3, Interface Specification, Documentation Release #4* (und `asio.h`/`iasiodrv.h`).
+Bei Widerspruch zwischen Code, CLAUDE.md und Spezifikation gilt die Spezifikation. Abweichungen sind nur als
+dokumentierte Treiber-Workarounds zulässig (Kommentar mit betroffenem Treiber und Spec-Stelle, Eintrag in CLAUDE.md).
+Die Referenz-Hosts (SDK-`hostsample`, PortAudio, JUCE) dienen als Praxisbeleg, nicht als Norm.
+
+### IX. Lizenz der ASIO-Nutzung ist geklärt
+Der Build gegen das ASIO SDK und die Weitergabe von `opencast-client-asio.exe` erfolgen auf Basis einer bewusst gewählten
+Lizenz (Steinberg ASIO License ODER GPLv3, SDK seit 2.3.4 dual lizenziert). Das Repository enthält die dazu passende
+Lizenzdatei und Markenhinweise. Das SDK selbst wird nicht ins Repository eingecheckt.
+
 ## Zusätzliche Randbedingungen
 - Plattform Windows; ASIO-Build nur mit `-tags asio` und MinGW + ASIO SDK.
 - Der ASIO-Client heißt immer `opencast-client-asio.exe`.
@@ -51,4 +62,5 @@ liegt in reinen, ohne Treiber testbaren Funktionen. CI baut nicht nur, sondern v
 Diese Constitution schlägt Einzelwünsche in Specs, Plänen und Tasks. Änderungen erfolgen explizit
 und getrennt von Feature-Arbeit, mit Begründung in der Versionszeile.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-03 | **Last Amended**: 2026-10-03
+**Version**: 1.1.0 | **Ratified**: 2026-10-03 | **Last Amended**: 2026-10-03
+(1.1.0: Prinzipien VIII und IX ergänzt — offizielle Spec als Norm, Lizenzklärung.)
