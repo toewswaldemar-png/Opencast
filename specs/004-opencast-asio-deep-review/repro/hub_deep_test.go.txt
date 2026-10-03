@@ -1,0 +1,199 @@
+package hub
+
+// Tiefenprüfung ASIO-Hub (Spec Kit 004). Läuft unter Linux per `go test -overlay`.
+// Der "Bridge-Mock" bildet goAsioBufferCallback aus asio_bridge.go:63-79 nach.
+
+import (
+	"context"
+	"io"
+	"math"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"client/internal/audio"
+)
+
+// bridgeFire erzeugt einen interleaved int16-Puffer (Kanal c trägt konstant (c+1)*1000)
+// und liefert ihn so an den Fan-Out-Callback, wie asio_bridge.go es tut (Mono → Stereo-Expansion).
+func bridgeFire(mc *mockCapturer, nCh, frames int) {
+	raw := make([]byte, frames*nCh*2)
+	for f := 0; f < frames; f++ {
+		for c := 0; c < nCh; c++ {
+			v := int16((c + 1) * 1000)
+			raw[(f*nCh+c)*2] = byte(v)
+			raw[(f*nCh+c)*2+1] = byte(v >> 8)
+		}
+	}
+	buf := raw
+	if nCh == 1 { // asio_bridge.go:65-74
+		buf = make([]byte, frames*4)
+		for i := 0; i < frames; i++ {
+			buf[i*4+0], buf[i*4+1] = raw[i*2], raw[i*2+1]
+			buf[i*4+2], buf[i*4+3] = raw[i*2], raw[i*2+1]
+		}
+	}
+	mc.fireFanOut(buf)
+}
+
+func dbfs(v float64) float64 { return 20 * math.Log10(v/32768) }
+
+func noIngest(ctx context.Context, url, ct string, r io.Reader) error {
+	io.Copy(io.Discard, r)
+	return nil
+}
+
+// F-23: Nach Unsubscribe eines Subscribers mit niedrigeren Kanälen zeigen die Positionen der
+// übrigen Subscriber auf die falschen Kanäle des (unverändert offenen) Capturers.
+func TestDeep_F23_UnsubscribeShiftsPositions(t *testing.T) {
+	h, fac := hubWithMock("asio:{deep}")
+	var lvlB atomic.Value
+	_ = h.Subscribe("A", 1, 2, 48000, Callbacks{OnLevel: func(audio.LevelUpdate) {}}) // Kanäle 0,1
+	_ = h.StartStream("B", 3, 4, 48000, StreamConfig{IngestURL: "x", IngestFunc: noIngest},
+		Callbacks{OnLevel: func(l audio.LevelUpdate) { lvlB.Store(l) }}) // Kanäle 2,3
+	mc := fac.getLast()
+	h.mu.Lock()
+	t.Logf("vor Unsubscribe: capChs=%v nativeCh=%d posB=(%d,%d)", h.capChs, h.nativeCh, h.subs["B"].posL, h.subs["B"].posR)
+	h.mu.Unlock()
+
+	h.Unsubscribe("A")
+
+	h.mu.Lock()
+	b := h.subs["B"]
+	capChs, native := append([]int(nil), h.capChs...), h.nativeCh
+	pl, pr := b.posL, b.posR
+	h.mu.Unlock()
+	t.Logf("nach Unsubscribe: capChs=%v nativeCh=%d posB=(%d,%d)", capChs, native, pl, pr)
+
+	// Der Capturer liefert weiterhin alle capChs; B will Kanäle 2,3 = Positionen 2,3.
+	wantL, wantR := indexOf(capChs, b.chL), indexOf(capChs, b.chR)
+	bridgeFire(mc, len(capChs), 256)
+	l, _ := lvlB.Load().(audio.LevelUpdate)
+	t.Logf("B-Pegel L=%.1f dBFS (Kanal 3 trägt 3000 → %.1f dBFS, Kanal 1 trägt 1000 → %.1f dBFS)", l.Left, dbfs(3000), dbfs(1000))
+	if pl != wantL || pr != wantR {
+		t.Errorf("Positionen von B = (%d,%d), erwartet (%d,%d) bezogen auf capChs %v", pl, pr, wantL, wantR, capChs)
+	}
+	if math.Abs(l.Left-dbfs(3000)) > 0.5 {
+		t.Errorf("B hört nicht seinen Kanal: L=%.1f dBFS, erwartet %.1f dBFS", l.Left, dbfs(3000))
+	}
+}
+
+// F-01: Mono (eine Kanal-Union) – Frames am PCMBuffer nach Hub-Extraktion.
+func TestDeep_F01_MonoStreamFrameCount(t *testing.T) {
+	h, fac := hubWithMock("asio:{deep-mono}")
+	_ = h.StartStream("S", 2, 2, 48000, StreamConfig{IngestURL: "x", IngestFunc: noIngest}, Callbacks{})
+	mc := fac.getLast()
+	h.mu.Lock()
+	buf := h.subs["S"].buf
+	h.mu.Unlock()
+	const calls, frames = 12, 256 // je 256 ASIO-Frames = 1 PCMBuffer-Frame (1024 Byte)
+	// Session-Ticker verbraucht ~1 Frame/5,3 ms; die 12 Aufrufe laufen in Mikrosekunden.
+	buf.Reset()
+	for i := 0; i < calls; i++ {
+		bridgeFire(mc, 1, frames)
+	}
+	got := buf.Len()
+	t.Logf("erwartet %d PCMBuffer-Frames, im Puffer: %d", calls, got)
+	if got > calls+1 || got < calls-1 {
+		t.Errorf("Mono-Stream liefert %d statt %d Frames (Faktor %.1f)", got, calls, float64(got)/calls)
+	}
+}
+
+// F-24: Ein Monitor auf anderen Kanälen startet den Capturer neu, während ein Stream läuft.
+func TestDeep_F24_AddMonitorRestartsCapturerDuringStream(t *testing.T) {
+	h, fac := hubWithMock("asio:{deep-restart}")
+	var starts atomic.Int32
+	orig := h.newCap
+	h.newCap = func(cfg audio.CaptureConfig) audio.Capturer { starts.Add(1); return orig(cfg) }
+	_ = h.StartStream("S", 1, 2, 48000, StreamConfig{IngestURL: "x", IngestFunc: noIngest}, Callbacks{})
+	h.mu.Lock()
+	sessBefore := h.subs["S"].session
+	h.mu.Unlock()
+	first := fac.getLast()
+
+	_ = h.Subscribe("M", 5, 6, 48000, Callbacks{OnLevel: func(audio.LevelUpdate) {}})
+
+	h.mu.Lock()
+	sessAfter := h.subs["S"].session
+	h.mu.Unlock()
+	t.Logf("Capturer-Starts: %d, Stream-Session bleibt: %v, alter Capturer gestoppt: %v",
+		starts.Load(), sessBefore == sessAfter, first.stopCalled.Load())
+	if starts.Load() != 2 {
+		t.Errorf("erwartet 2 Capturer-Starts (Neustart durch Union-Erweiterung), war %d", starts.Load())
+	}
+}
+
+// guardedMock bildet die Zusage der Spec nach (§III.2, ASIOStop): Nach Stop() läuft kein Callback mehr.
+// Stop() wartet auf laufende Callbacks; danach werden keine neuen mehr zugestellt.
+type guardedMock struct {
+	*mockCapturer
+	mu sync.RWMutex
+}
+
+func (g *guardedMock) Stop() { g.mu.Lock(); g.mockCapturer.Stop(); g.mu.Unlock() }
+
+func (g *guardedMock) deliver(nCh, frames int) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if g.stopCalled.Load() {
+		return
+	}
+	bridgeFire(g.mockCapturer, nCh, frames)
+	g.fireMultiLevel(frames, make([]int16, frames*nCh))
+}
+
+// Stress mit -race: Subscribe/Unsubscribe/Stream-Churn, während ein simulierter ASIO-Thread Callbacks liefert.
+// Voraussetzung wie in der Praxis: Der Treiber liefert immer so viele Kanäle, wie der Capturer geöffnet hat,
+// und nach Stop() keine Callbacks mehr. (Ohne diese Zusage – siehe F-21 – paniert ExtractChannelLevel, F-29.)
+func TestDeep_RaceStress(t *testing.T) {
+	h := newHub("asio:{deep-race}")
+	var last atomic.Pointer[guardedMock]
+	h.newCap = func(cfg audio.CaptureConfig) audio.Capturer {
+		g := &guardedMock{mockCapturer: newMockCapturer(cfg).(*mockCapturer)}
+		g.cfg = cfg
+		last.Store(g)
+		return g
+	}
+	_ = h.Subscribe("base", 1, 2, 48000, Callbacks{OnLevel: func(audio.LevelUpdate) {}})
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if g := last.Load(); g != nil {
+				if n := len(g.cfg.Channels); n > 0 {
+					g.deliver(n, 64)
+				}
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	for i := 0; i < 6; i++ {
+		id := string(rune('a' + i))
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			for k := 0; k < 8; k++ {
+				ch := uint16(1 + (i+k)%4)
+				if k%2 == 0 {
+					_ = h.Subscribe(id, ch, ch+1, 48000, Callbacks{OnLevel: func(audio.LevelUpdate) {}})
+				} else {
+					_ = h.StartStream(id, ch, ch+1, 48000, StreamConfig{IngestURL: "x", IngestFunc: noIngest}, Callbacks{})
+				}
+				time.Sleep(3 * time.Millisecond)
+				h.Unsubscribe(id)
+			}
+		}(i, id)
+	}
+	time.Sleep(900 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	h.StopAll()
+}

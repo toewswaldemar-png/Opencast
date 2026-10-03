@@ -1,0 +1,86 @@
+package pcmbuffer
+
+// Drift-Simulation (Spec Kit 004, F-22): Producer = ASIO-Takt, Consumer = Wanduhr-Ticker der StreamSession.
+// Virtuelle Zeit, echter PCMBuffer (Frame 1024 Byte = 256 Stereo-Samples, Kapazität 50 wie hub.go).
+
+import (
+	"container/heap"
+	"math/rand"
+	"testing"
+)
+
+type ev struct {
+	t    float64
+	kind int // 0 = Producer-Callback, 1 = Consumer-Tick
+}
+type evq []ev
+
+func (q evq) Len() int            { return len(q) }
+func (q evq) Less(i, j int) bool  { return q[i].t < q[j].t }
+func (q evq) Swap(i, j int)       { q[i], q[j] = q[j], q[i] }
+func (q *evq) Push(x interface{}) { *q = append(*q, x.(ev)) }
+func (q *evq) Pop() interface{}   { o := *q; n := len(o); x := o[n-1]; *q = o[:n-1]; return x }
+
+func simulate(asioFrames int, ppm float64, jitterConsMs, jitterProdMs, hours float64, prefill int) (under, over int, minLvl, maxLvl int) {
+	const sr, frameSamples = 48000.0, 256.0
+	rng := rand.New(rand.NewSource(1))
+	b := New(1024, 50)
+	frame := make([]byte, 1024)
+	for i := 0; i < prefill; i++ {
+		b.WriteFrame(frame)
+	}
+	consPeriod := frameSamples / sr
+	prodPeriod := float64(asioFrames) / sr * (1 + ppm*1e-6)
+	end := hours * 3600
+	q := &evq{}
+	heap.Push(q, ev{0.0, 0})
+	heap.Push(q, ev{consPeriod, 1})
+	nProd, nCons := 1, 1
+	acc := 0.0 // aufgelaufene Samples im Producer
+	minLvl, maxLvl = 1<<30, 0
+	for q.Len() > 0 {
+		e := heap.Pop(q).(ev)
+		if e.t > end {
+			break
+		}
+		if e.kind == 0 {
+			acc += float64(asioFrames)
+			for acc >= frameSamples {
+				if b.Len() == b.Cap() {
+					over++
+				}
+				b.WriteFrame(frame)
+				acc -= frameSamples
+			}
+			j := (rng.Float64()*2 - 1) * jitterProdMs / 1000
+			heap.Push(q, ev{float64(nProd)*prodPeriod + j, 0})
+			nProd++
+		} else {
+			if b.Len() == 0 {
+				under++
+			}
+			b.ReadFrame(frame)
+			j := (rng.Float64()*2 - 1) * jitterConsMs / 1000
+			heap.Push(q, ev{float64(nCons)*consPeriod + j, 1})
+			nCons++
+		}
+		if l := b.Len(); l < minLvl {
+			minLvl = l
+		} else if l > maxLvl {
+			maxLvl = l
+		}
+	}
+	return
+}
+
+func TestDriftSimulation(t *testing.T) {
+	t.Logf("%-8s %-9s %-10s | %-10s %-10s %-9s | Glitches/h", "ASIO-Buf", "Drift ppm", "Vorfüllung", "Underruns", "Overflows", "Pegel min-max")
+	for _, bs := range []int{256, 512, 2048} {
+		for _, ppm := range []float64{0, 20, -20, 50, -50, 100, -100} {
+			for _, pre := range []int{0, 4} {
+				u, o, mn, mx := simulate(bs, ppm, 1.0, 0.3, 1.0, pre)
+				t.Logf("%-8d %-9.0f %-10d | %-10d %-10d %3d-%-3d    | %d", bs, ppm, pre, u, o, mn, mx, u+o)
+			}
+		}
+	}
+}
