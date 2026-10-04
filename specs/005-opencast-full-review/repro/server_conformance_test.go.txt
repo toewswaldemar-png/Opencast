@@ -1,0 +1,369 @@
+package xtest
+
+// Konformitätsprüfung: Szenarien aus openspec/specs/* gegen den echten Server-Code.
+// Aufbau wie server/main.go (Routen und Hub-Verdrahtung); nur der eingebettete Frontend-Handler fehlt.
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/websocket"
+
+	"server/internal/api"
+	"server/internal/config"
+	"server/internal/icecast"
+	"server/internal/ingest"
+)
+
+type env struct {
+	t      *testing.T
+	ts     *httptest.Server
+	hub    *api.Hub
+	ch     *api.ClientHub
+	relay  *ingest.Relay
+	store  *config.Store
+	wsBase string
+}
+
+func newEnv(t *testing.T, baseURL string) *env {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	st, _ := config.NewStore()
+	hub := api.NewHub()
+	relay := ingest.NewRelay()
+	ch := api.NewClientHub(hub, relay)
+	srv := api.NewServer(st, hub, ch, relay, baseURL)
+	// wie main.go:53-73
+	hub.SetOnNewClient(func(send func(api.MessageType, any)) {
+		c := ch.IsConnected()
+		send(api.MsgClientOnline, c)
+		if c {
+			if d := ch.Devices(); d != nil {
+				send(api.MsgDevices, d)
+			}
+		}
+		for _, u := range relay.AllActiveStats() {
+			send(api.MsgStatus, map[string]any{"streamId": u.StreamID, "connected": u.Connected})
+		}
+	})
+	relay.SetStatusCallback(func(u ingest.StatusUpdate) {
+		hub.Broadcast(api.MsgStatus, map[string]any{"streamId": u.StreamID, "running": u.Connected || u.Reconnecting, "connected": u.Connected})
+	})
+	r := chi.NewRouter()
+	r.Get("/ws", hub.ServeWS)
+	r.Get("/ws/client", ch.ServeWS)
+	r.Put("/ingest/{streamId}", relay.HandleIngest)
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/devices", srv.HandleDevices)
+		r.Get("/status", srv.HandleStatus)
+		r.Post("/stream/start", srv.HandleStart)
+		r.Post("/stream/stop", srv.HandleStop)
+		r.Get("/config", srv.HandleConfigGet)
+		r.Put("/config", srv.HandleConfigPut)
+		r.Post("/stream/metadata", srv.HandleMetadata)
+		r.Post("/monitor/start", srv.HandleMonitorStart)
+		r.Post("/monitor/stop", srv.HandleMonitorStop)
+	})
+	ts := httptest.NewServer(r)
+	t.Cleanup(ts.Close)
+	return &env{t: t, ts: ts, hub: hub, ch: ch, relay: relay, store: st, wsBase: "ws" + strings.TrimPrefix(ts.URL, "http")}
+}
+
+type fakeClient struct {
+	conn *websocket.Conn
+	msgs chan map[string]any
+}
+
+func (e *env) connectClient() *fakeClient {
+	e.t.Helper()
+	c, _, err := websocket.DefaultDialer.Dial(e.wsBase+"/ws/client", nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	fc := &fakeClient{conn: c, msgs: make(chan map[string]any, 64)}
+	go func() {
+		defer close(fc.msgs)
+		for {
+			_, raw, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			var m map[string]any
+			json.Unmarshal(raw, &m)
+			fc.msgs <- m
+		}
+	}()
+	e.t.Cleanup(func() { c.Close() })
+	for i := 0; i < 100 && !e.ch.IsConnected(); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fc
+}
+
+func (fc *fakeClient) next(t *testing.T, d time.Duration) (map[string]any, bool) {
+	select {
+	case m, ok := <-fc.msgs:
+		return m, ok
+	case <-time.After(d):
+		return nil, false
+	}
+}
+
+func (e *env) post(path string, body any) (int, string) {
+	b, _ := json.Marshal(body)
+	resp, err := http.Post(e.ts.URL+path, "application/json", bytes.NewReader(b))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(out)
+}
+
+func startBody(id string) map[string]any {
+	return map[string]any{"streamId": id, "deviceId": "wasapi:x", "server": map[string]any{"host": "127.0.0.1", "port": 1, "mountPoint": "/m"}}
+}
+
+// ── stream-control ───────────────────────────────────────────────────────────
+
+func TestSpec_StreamControl_StartDefaultsAndIngestURL(t *testing.T) {
+	e := newEnv(t, "http://192.168.1.5:8765")
+	fc := e.connectClient()
+	code, body := e.post("/api/stream/start", startBody("1"))
+	if code != 200 || !strings.Contains(body, `"started"`) {
+		t.Fatalf("start: %d %s", code, body)
+	}
+	m, ok := fc.next(t, time.Second)
+	if !ok || m["type"] != "cmd:start" {
+		t.Fatalf("cmd:start fehlt: %v", m)
+	}
+	p := m["payload"].(map[string]any)
+	want := map[string]any{"sampleRate": 44100.0, "channelLeft": 1.0, "channelRight": 2.0, "bitrate": 192.0, "format": "mp3", "ingestUrl": "http://192.168.1.5:8765/ingest/1"}
+	for k, v := range want {
+		if p[k] != v {
+			t.Errorf("payload[%s] = %v, erwartet %v", k, p[k], v)
+		}
+	}
+}
+
+func TestSpec_StreamControl_ErrorCodes(t *testing.T) {
+	e := newEnv(t, "http://x")
+	if c, _ := e.post("/api/stream/start", map[string]any{"deviceId": "x"}); c != 400 {
+		t.Errorf("fehlende streamId: %d, erwartet 400", c)
+	}
+	if c, _ := e.post("/api/stream/start", startBody("1")); c != 503 {
+		t.Errorf("kein Client: %d, erwartet 503", c)
+	}
+	if e.relay.IsRegistered("1") {
+		t.Errorf("bei 503 darf kein Stream registriert bleiben")
+	}
+	e.connectClient()
+	e.post("/api/stream/start", startBody("1"))
+	if c, _ := e.post("/api/stream/start", startBody("1")); c != 409 {
+		t.Errorf("doppelter Start: %d, erwartet 409", c)
+	}
+}
+
+func TestSpec_StreamControl_StopSendsCmdStop(t *testing.T) {
+	e := newEnv(t, "http://x")
+	fc := e.connectClient()
+	e.post("/api/stream/start", startBody("1"))
+	fc.next(t, time.Second)
+	code, _ := e.post("/api/stream/stop", map[string]any{"streamId": "1"})
+	m, _ := fc.next(t, time.Second)
+	if code != 200 || m["type"] != "cmd:stop" || e.relay.IsRegistered("1") {
+		t.Errorf("stop: code=%d msg=%v registered=%v", code, m, e.relay.IsRegistered("1"))
+	}
+}
+
+// ── ingest-relay ─────────────────────────────────────────────────────────────
+
+func TestSpec_Ingest_404ForUnknown_And_LazyIcecastConnect(t *testing.T) {
+	e := newEnv(t, "http://x")
+	req, _ := http.NewRequest("PUT", e.ts.URL+"/ingest/nope", strings.NewReader("x"))
+	cl := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}} // wie client/internal/wsclient
+	resp, _ := cl.Do(req)
+	if resp.StatusCode != 404 {
+		t.Errorf("unbekannte streamId: %d, erwartet 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+	port, headers, closeFn := fakeIcecast(t)
+	defer closeFn()
+	e.relay.Register("s", ingest.StreamConfig{IcecastCfg: icecast.ServerConfig{Host: "127.0.0.1", Port: port, MountPoint: "/m", Protocol: icecast.ProtocolIcecast2}, ContentType: "audio/mpeg"})
+	pr, pw := io.Pipe()
+	r2, _ := http.NewRequest("PUT", e.ts.URL+"/ingest/s", pr)
+	respCh := make(chan *http.Response, 1)
+	go func() { rs, _ := cl.Do(r2); respCh <- rs }()
+	go pw.Write(bytes.Repeat([]byte{1}, 256*1024)) // groß genug, damit der HTTP-Client den Body flusht
+	select {
+	case <-headers:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Icecast wurde nach dem ersten Chunk nicht verbunden")
+	}
+	select {
+	case rs := <-respCh:
+		if rs.StatusCode != 200 {
+			t.Errorf("Ingest: %d, erwartet 200", rs.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("200 wurde nicht sofort gesendet")
+	}
+	pw.Close()
+}
+
+// ── client-connection ────────────────────────────────────────────────────────
+
+func TestSpec_Client_SecondConnectionReplacesFirst(t *testing.T) {
+	e := newEnv(t, "http://x")
+	a := e.connectClient()
+	e.connectClient()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-a.msgs:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("erste Verbindung wurde nicht geschlossen")
+		}
+	}
+}
+
+func TestSpec_Client_StreamErrorUnregistersAndBroadcasts(t *testing.T) {
+	e := newEnv(t, "http://x")
+	fc := e.connectClient()
+	browser, _, _ := websocket.DefaultDialer.Dial(e.wsBase+"/ws", nil)
+	defer browser.Close()
+	e.post("/api/stream/start", startBody("9"))
+	fc.next(t, time.Second)
+	fc.conn.WriteJSON(map[string]any{"type": "stream:error", "payload": map[string]any{"streamId": "9", "message": "kaputt"}})
+	got := false
+	browser.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for !got {
+		_, raw, err := browser.ReadMessage()
+		if err != nil {
+			break
+		}
+		got = strings.Contains(string(raw), `"error"`) && strings.Contains(string(raw), "kaputt")
+	}
+	if !got || e.relay.IsRegistered("9") {
+		t.Errorf("error gesendet=%v, noch registriert=%v", got, e.relay.IsRegistered("9"))
+	}
+}
+
+func TestSpec_Client_OversizedMessageClosesConnection(t *testing.T) {
+	e := newEnv(t, "http://x")
+	fc := e.connectClient()
+	fc.conn.WriteMessage(websocket.TextMessage, bytes.Repeat([]byte("a"), 70*1024))
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-fc.msgs:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("Verbindung blieb trotz >64 KiB offen")
+		}
+	}
+}
+
+// ── browser-realtime / device-discovery ──────────────────────────────────────
+
+func TestSpec_Browser_InitialStateAndDevices(t *testing.T) {
+	e := newEnv(t, "http://x")
+	fc := e.connectClient()
+	fc.conn.WriteJSON(map[string]any{"type": "devices", "payload": []any{map[string]any{"id": "asio:{A}", "name": "X (ASIO)", "maxInputChannels": 8}}})
+	time.Sleep(100 * time.Millisecond)
+	browser, _, _ := websocket.DefaultDialer.Dial(e.wsBase+"/ws", nil)
+	defer browser.Close()
+	var types []string
+	browser.SetReadDeadline(time.Now().Add(time.Second))
+	for i := 0; i < 2; i++ {
+		_, raw, err := browser.ReadMessage()
+		if err != nil {
+			break
+		}
+		var m struct{ Type string `json:"type"` }
+		json.Unmarshal(raw, &m)
+		types = append(types, m.Type)
+	}
+	if len(types) < 2 || types[0] != "clientOnline" || types[1] != "devices" {
+		t.Errorf("Anfangszustand = %v, erwartet [clientOnline devices]", types)
+	}
+	resp, _ := http.Get(e.ts.URL + "/api/devices")
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "asio:{A}") {
+		t.Errorf("/api/devices = %s", b)
+	}
+}
+
+func TestSpec_Devices_EmptyListWithoutClient(t *testing.T) {
+	e := newEnv(t, "http://x")
+	resp, _ := http.Get(e.ts.URL + "/api/devices")
+	b, _ := io.ReadAll(resp.Body)
+	if strings.TrimSpace(string(b)) != "[]" {
+		t.Errorf("/api/devices = %q, erwartet []", b)
+	}
+}
+
+// ── level-monitoring ─────────────────────────────────────────────────────────
+
+func TestSpec_Monitor_StartBlockedByStream_GlobalStopGrace_PerCardStop(t *testing.T) {
+	e := newEnv(t, "http://x")
+	fc := e.connectClient()
+	mon := map[string]any{"monitorId": "c1", "deviceId": "d", "sampleRate": 48000, "channelLeft": 1, "channelRight": 2}
+	e.post("/api/monitor/start", mon)
+	if m, _ := fc.next(t, time.Second); m["type"] != "cmd:monitor:start" {
+		t.Fatalf("cmd:monitor:start fehlt: %v", m)
+	}
+	// Karenzzeit: globaler Stopp + gleicher Start innerhalb 300 ms → kein Stopp beim Client
+	e.post("/api/monitor/stop", map[string]any{})
+	time.Sleep(100 * time.Millisecond)
+	e.post("/api/monitor/start", mon)
+	if m, ok := fc.next(t, 600*time.Millisecond); ok {
+		t.Errorf("Client erhielt trotz Karenzzeit: %v", m)
+	}
+	// Stopp je Karte sofort
+	e.post("/api/monitor/stop", map[string]any{"monitorId": "c1"})
+	if m, _ := fc.next(t, 500*time.Millisecond); m["type"] != "cmd:monitor:stop" {
+		t.Errorf("Stopp je Karte nicht sofort: %v", m)
+	}
+	// Stream aktiv → kein Monitor
+	e.post("/api/stream/start", startBody("c2"))
+	fc.next(t, time.Second)
+	code, _ := e.post("/api/monitor/start", map[string]any{"monitorId": "c2", "deviceId": "d"})
+	if m, ok := fc.next(t, 400*time.Millisecond); code != 200 || ok {
+		t.Errorf("Monitor trotz laufendem Stream: code=%d msg=%v", code, m)
+	}
+}
+
+// ── settings-persistence ─────────────────────────────────────────────────────
+
+func TestSpec_Settings_PartialPutAndDefaults(t *testing.T) {
+	e := newEnv(t, "http://x")
+	put := func(v any) {
+		b, _ := json.Marshal(v)
+		req, _ := http.NewRequest("PUT", e.ts.URL+"/api/config", bytes.NewReader(b))
+		resp, _ := http.DefaultClient.Do(req)
+		resp.Body.Close()
+	}
+	put(map[string]any{"servers": []any{map[string]any{"id": "1", "label": "A", "config": map[string]any{"host": "h", "port": 8000}}}, "deviceId": "dev"})
+	put(map[string]any{"autoReconnect": true})
+	cfg := e.store.Get()
+	if len(cfg.Servers) != 1 || cfg.DeviceID != "dev" || cfg.AutoReconnect == nil || !*cfg.AutoReconnect {
+		t.Errorf("Teil-PUT hat andere Felder verändert: %+v", cfg)
+	}
+	e2 := newEnv(t, "http://x")
+	if e2.store.Get().AutoReconnect != nil {
+		t.Errorf("AutoReconnect ohne Wert muss als aus gelten")
+	}
+}

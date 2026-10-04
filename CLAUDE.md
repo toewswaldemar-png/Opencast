@@ -113,3 +113,10 @@ Cache wird bei jedem erfolgreichen Open aktualisiert.
 ### Winsock-Include-Reihenfolge in asio_host.cpp
 `#include <winsock2.h>` MUSS vor `#include <windows.h>` stehen.
 
+## Spezifikations-Workflow
+
+- **Verhalten** steht in `openspec/specs/` (12 Capabilities, Ist-Zustand). Änderungen laufen über OpenSpec-Changes
+  (`/opsx:propose`, `/opsx:apply`, `/opsx:archive`; Validierung: `openspec validate --all --strict`). Aufgaben stehen im jeweiligen Change.
+- **Constitution und Review-Berichte** (Spec Kit): `.specify/memory/constitution.md`, `specs/001`–`005` (Befunde, Belege, `repro/run.sh`).
+- Hinweis zum Stand: Die Abschnitte oben zu `monitor.go` und zum Callback-Hotpath beschreiben den Zustand vor dem Hub (`client/internal/hub/hub.go`);
+  `monitor.go` liegt nur noch in `backend/internal/stream/`. Siehe `specs/001-asio-capture-review/analysis.md` (F-09).

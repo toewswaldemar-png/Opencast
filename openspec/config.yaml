@@ -1,0 +1,37 @@
+schema: spec-driven
+
+context: |
+  Language: de
+  All artifacts must be written in de.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Projekt: Opencast — Windows-Audiostreaming. Drei Teile in einem Repository:
+  - server/   Go (chi), REST + WebSocket, Ingest-Relay zu Icecast; keine Audioverarbeitung
+  - client/   Go, Windows (WASAPI; ASIO über CGO mit -tags asio), Encoding per ffmpeg, PUT /ingest/{id}
+  - frontend/ React/Vite, wird nach server/dist gebaut und eingebettet
+  - backend/  Altbestand (vor der Server/Client-Trennung), nicht mehr Teil des Release
+  Verhalten steht in openspec/specs (Quelle der Wahrheit); Review-Berichte stehen in specs/ (Spec Kit).
+  Specs beschreiben beobachtbares Verhalten, keine Funktions- oder Paketnamen.
+  Nachgewiesene Befunde und ihre Reproduktion: specs/004-* und specs/005-* (repro/run.sh).
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

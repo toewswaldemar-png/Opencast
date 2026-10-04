@@ -1,6 +1,6 @@
 # Opencast Constitution
 
-Abgeleitet aus `CLAUDE.md` (Stand der ASIO-Implementierung in `client/internal/audio/`).
+Abgeleitet aus `CLAUDE.md` und den Prüfungen in `specs/001`–`005`; gilt für das ganze Projekt (Server, Client, Frontend).
 Diese Prinzipien sind die Prüfgrundlage für `/speckit-analyze`.
 
 ## Core Principles
@@ -52,6 +52,20 @@ Der Build gegen das ASIO SDK und die Weitergabe von `opencast-client-asio.exe` e
 Lizenz (Steinberg ASIO License ODER GPLv3, SDK seit 2.3.4 dual lizenziert). Das Repository enthält die dazu passende
 Lizenzdatei und Markenhinweise. Das SDK selbst wird nicht ins Repository eingecheckt.
 
+### X. Grenzen sind authentifiziert und validiert
+Jede Schnittstelle, die von außen erreichbar ist (REST, WebSockets, Ingest), verlangt ein Token. Eingaben, die in Protokolle,
+Pfade, Header oder COM-/Treiberaufrufe einfließen, werden validiert (keine Steuerzeichen, Geräte-IDs nur aus der bekannten Liste).
+Geheimnisse (Icecast-Passwörter, Token) werden weder ausgeliefert noch mit weiten Dateirechten gespeichert.
+
+### XI. Tests und CI schützen jede Änderung
+Kernlogik (Hub, Session, Relay, Handler) ist ohne Windows testbar. Jeder Pull Request führt `go vet`, `go test -race`, die
+Frontend-Typprüfung und die Kompilierung der Clients aus. Jede nachgewiesene Abweichung bekommt einen Test, der vor dem Fix rot ist.
+
+### XII. Eine Quelle der Wahrheit für Verhalten
+Beobachtbares Verhalten steht in `openspec/specs/` und wird nur über OpenSpec-Changes (`openspec/changes/`) geändert;
+Aufgaben leben im jeweiligen Change. Spec-Kit-Dokumente unter `specs/` sind Review-Berichte und halten Befunde, Belege und
+Reproduktionen fest, sie führen keine zweite Aufgabenliste.
+
 ## Zusätzliche Randbedingungen
 - Plattform Windows; ASIO-Build nur mit `-tags asio` und MinGW + ASIO SDK.
 - Der ASIO-Client heißt immer `opencast-client-asio.exe`.
@@ -62,5 +76,6 @@ Lizenzdatei und Markenhinweise. Das SDK selbst wird nicht ins Repository eingech
 Diese Constitution schlägt Einzelwünsche in Specs, Plänen und Tasks. Änderungen erfolgen explizit
 und getrennt von Feature-Arbeit, mit Begründung in der Versionszeile.
 
-**Version**: 1.1.0 | **Ratified**: 2026-10-03 | **Last Amended**: 2026-10-03
+**Version**: 1.2.0 | **Ratified**: 2026-10-03 | **Last Amended**: 2026-10-03
 (1.1.0: Prinzipien VIII und IX ergänzt — offizielle Spec als Norm, Lizenzklärung.)
+(1.2.0: Prinzipien X, XI, XII ergänzt — Grenzen absichern, Tests/CI, OpenSpec als Quelle der Wahrheit; Geltungsbereich jetzt das ganze Projekt.)

@@ -1,0 +1,261 @@
+package xtest
+
+// Tiefenprüfung Server (Spec Kit 005 / OpenSpec). Alle Tests nutzen den echten Server-Code.
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/websocket"
+
+	"server/internal/api"
+	"server/internal/config"
+	"server/internal/icecast"
+	"server/internal/ingest"
+)
+
+// fakeIcecast akzeptiert Verbindungen, liest den Request-Header bis zur Leerzeile, antwortet 100 Continue
+// und liest danach nur noch. Der Header wird auf dem Kanal geliefert.
+func fakeIcecast(t *testing.T) (port int, headers chan string, closeFn func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers = make(chan string, 16)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				var sb strings.Builder
+				for {
+					l, err := br.ReadString('\n')
+					if err != nil {
+						return
+					}
+					sb.WriteString(l)
+					if l == "\r\n" {
+						break
+					}
+				}
+				headers <- sb.String()
+				c.Write([]byte("HTTP/1.0 100 Continue\r\n\r\n"))
+				io.Copy(io.Discard, br)
+			}(c)
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port, headers, func() { ln.Close() }
+}
+
+// S-1: GET /api/config liefert das Icecast-Passwort im Klartext, ohne Authentifizierung.
+func TestS1_ConfigGetLeaksIcecastPassword(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	st, err := config.NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Set(config.Config{Servers: []config.ServerEntry{{ID: "1", Config: config.ServerConfig{Host: "ice", Port: 8000, Password: "geheim123"}}}})
+	srv := api.NewServer(st, api.NewHub(), api.NewClientHub(api.NewHub(), nil), ingest.NewRelay(), "http://x")
+	rr := httptest.NewRecorder()
+	srv.HandleConfigGet(rr, httptest.NewRequest("GET", "/api/config", nil)) // keine Authorization
+	body := rr.Body.String()
+	t.Logf("HTTP %d, Passwort im Body: %v", rr.Code, strings.Contains(body, "geheim123"))
+	if strings.Contains(body, "geheim123") {
+		t.Errorf("Passwort wird unauthentifiziert im Klartext ausgeliefert")
+	}
+	fi, _ := os.Stat(dir + "/Opencast/server.json")
+	t.Logf("Konfigdatei-Rechte: %v", fi.Mode().Perm())
+	if fi.Mode().Perm()&0o044 != 0 {
+		t.Errorf("Konfigdatei mit Klartext-Passwort ist weltlesbar (%v)", fi.Mode().Perm())
+	}
+}
+
+// S-2: CRLF in Name/Description/Genre/Mount landet ungefiltert im Request an Icecast.
+func TestS2_IcecastHeaderInjection(t *testing.T) {
+	port, headers, closeFn := fakeIcecast(t)
+	defer closeFn()
+	c := icecast.NewClient(icecast.ServerConfig{
+		Host: "127.0.0.1", Port: port, Password: "pw", MountPoint: "/live",
+		Protocol: icecast.ProtocolIcecast2, ContentType: "audio/mpeg",
+		Name: "Radio\r\nX-Injected: yes", Genre: "x\r\n\r\nPUT /admin/killsource HTTP/1.0",
+	})
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	defer c.Disconnect()
+	select {
+	case h := <-headers:
+		t.Logf("empfangener Request:\n%s", strings.ReplaceAll(h, "\r\n", "⏎\n"))
+		if strings.Contains(h, "\r\nX-Injected: yes") {
+			t.Errorf("injizierter Header erreicht den Icecast-Server")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("kein Request")
+	}
+}
+
+// S-3: UseSSL=true ändert nichts an der Source-Verbindung: sie bleibt Klartext-TCP.
+func TestS3_UseSSLStillPlaintext(t *testing.T) {
+	port, headers, closeFn := fakeIcecast(t)
+	defer closeFn()
+	c := icecast.NewClient(icecast.ServerConfig{Host: "127.0.0.1", Port: port, Password: "pw-im-klartext", MountPoint: "/live",
+		Protocol: icecast.ProtocolIcecast2, ContentType: "audio/mpeg", UseSSL: true})
+	if err := c.Connect(); err != nil {
+		t.Fatalf("Connect mit UseSSL=true gegen Klartext-Server gelang nicht: %v", err)
+	}
+	defer c.Disconnect()
+	h := <-headers
+	t.Logf("UseSSL=true, Verbindung gelang gegen reinen Klartext-Listener; Authorization-Header im Klartext sichtbar: %v", strings.Contains(h, "Authorization: Basic"))
+	if strings.Contains(h, "Authorization: Basic") {
+		t.Errorf("UseSSL=true wird bei der Source-Verbindung ignoriert (kein TLS)")
+	}
+}
+
+// R-1: Parallele Unregister-Aufrufe für denselben aktiven Stream (z. B. HTTP-Stop + Client-Stop).
+func TestR1_ConcurrentUnregister(t *testing.T) {
+	port, _, closeFn := fakeIcecast(t)
+	defer closeFn()
+	relay := ingest.NewRelay()
+	relay.Register("s1", ingest.StreamConfig{IcecastCfg: icecast.ServerConfig{Host: "127.0.0.1", Port: port, MountPoint: "/m", Protocol: icecast.ProtocolIcecast2}, ContentType: "audio/mpeg"})
+	pr, pw := io.Pipe()
+	req := httptest.NewRequest("PUT", "/ingest/s1", pr)
+	rec := httptest.NewRecorder()
+	handlerDone := make(chan struct{})
+	go func() { defer close(handlerDone); relay.HandleIngest(rec, req) }()
+	go func() {
+		for i := 0; i < 400; i++ {
+			if _, err := pw.Write(make([]byte, 1024)); err != nil {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	for i := 0; i < 200 && len(relay.AllActiveStats()) != 1; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(relay.AllActiveStats()) != 1 {
+		t.Fatal("Stream nicht aktiv geworden")
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	panics := 0
+	start := make(chan struct{})
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					panics++
+					mu.Unlock()
+				}
+			}()
+			<-start
+			relay.Unregister("s1")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	pw.Close()
+	<-handlerDone
+	t.Logf("%d von 64 gleichzeitigen Unregister-Aufrufen: panic (close of closed channel)", panics)
+	if panics > 0 {
+		t.Errorf("Unregister ist nicht nebenläufigkeitssicher: %d Panics", panics)
+	}
+}
+
+// W-1: Client-Takeover. Ein neuer /ws/client ersetzt den alten; der ALTE Handler sendet danach clientOnline=false.
+// Prüft, wie oft ein Browser danach "offline" als letzten Zustand sieht, obwohl ein Client verbunden ist.
+func TestW1_ClientReconnectLeavesBrowserOffline(t *testing.T) {
+	hub := api.NewHub()
+	ch := api.NewClientHub(hub, nil)
+	r := chi.NewRouter()
+	r.Get("/ws", hub.ServeWS)
+	r.Get("/ws/client", ch.ServeWS)
+	ts := httptest.NewServer(r)
+	defer ts.Close()
+	wsurl := "ws" + strings.TrimPrefix(ts.URL, "http")
+
+	const rounds = 40
+	wrong := 0
+	for i := 0; i < rounds; i++ {
+		browser, _, err := websocket.DefaultDialer.Dial(wsurl+"/ws", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var last atomicBool
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				_, raw, err := browser.ReadMessage()
+				if err != nil {
+					return
+				}
+				var m struct {
+					Type    string `json:"type"`
+					Payload bool   `json:"payload"`
+				}
+				if json.Unmarshal(raw, &m) == nil && m.Type == "clientOnline" {
+					last.Store(m.Payload)
+				}
+			}
+		}()
+		a, _, _ := websocket.DefaultDialer.Dial(wsurl+"/ws/client", nil)
+		time.Sleep(30 * time.Millisecond)
+		b, _, _ := websocket.DefaultDialer.Dial(wsurl+"/ws/client", nil) // ersetzt a
+		time.Sleep(150 * time.Millisecond)
+		if ch.IsConnected() && !last.Load() {
+			wrong++
+		}
+		a.Close()
+		b.Close()
+		browser.Close()
+		<-done
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Logf("%d von %d Reconnects: Browser zeigt 'Client offline', obwohl Client verbunden", wrong, rounds)
+	if wrong > 0 {
+		t.Errorf("clientOnline=false nach Reconnect in %d/%d Fällen", wrong, rounds)
+	}
+}
+
+type atomicBool struct{ v int32; mu sync.Mutex; b bool }
+
+func (a *atomicBool) Store(b bool) { a.mu.Lock(); a.b = b; a.mu.Unlock() }
+func (a *atomicBool) Load() bool   { a.mu.Lock(); defer a.mu.Unlock(); return a.b }
+
+// C-1: Icecast-Client unter -race: Write/Disconnect/Connect gleichzeitig (Auto-Reconnect-Pfad + Stop).
+func TestC1_IcecastClientRace(t *testing.T) {
+	port, _, closeFn := fakeIcecast(t)
+	defer closeFn()
+	c := icecast.NewClient(icecast.ServerConfig{Host: "127.0.0.1", Port: port, MountPoint: "/m", Protocol: icecast.ProtocolIcecast2, ContentType: "audio/mpeg"})
+	_ = c.Connect()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); for { select { case <-stop: return; default: c.Write(make([]byte, 64)) } } }()
+	go func() { defer wg.Done(); for i := 0; i < 20; i++ { c.Disconnect(); _ = c.Connect(); time.Sleep(5 * time.Millisecond) } }()
+	time.Sleep(400 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	c.Disconnect()
+	fmt.Fprintln(io.Discard)
+}
